@@ -59,6 +59,14 @@ public final class LocationService: NSObject, ObservableObject {
     /// Compass heading in degrees true north (0…360). nil until the
     /// first heading update arrives.
     @Published public private(set) var headingTrueDeg: Double?
+    /// Separate quality evidence for advisory overlays. Legacy navigation
+    /// keeps its existing magnetic fallback; AR never treats that as true north.
+    public struct OverlayHeading: Sendable {
+        public let trueDegrees: Double
+        public let accuracyDegrees: Double
+        public let timestamp: Date
+    }
+    @Published public private(set) var overlayHeading: OverlayHeading?
 
     public let bufferCapacity: Int
 
@@ -270,7 +278,10 @@ extension LocationService: CLLocationManagerDelegate {
         let deg = newHeading.trueHeading >= 0
             ? newHeading.trueHeading
             : newHeading.magneticHeading
-        Task { @MainActor in self.headingTrueDeg = deg }
+        let overlay: OverlayHeading? = newHeading.trueHeading >= 0 && newHeading.trueHeading < 360 &&
+            newHeading.headingAccuracy >= 0 && newHeading.headingAccuracy.isFinite
+            ? .init(trueDegrees: newHeading.trueHeading,accuracyDegrees: newHeading.headingAccuracy,timestamp: newHeading.timestamp) : nil
+        Task { @MainActor in self.headingTrueDeg = deg; self.overlayHeading = overlay }
     }
     #endif
 

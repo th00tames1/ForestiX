@@ -100,6 +100,38 @@ final class BackupArchiveTests: XCTestCase {
 
     // MARK: - Tests
 
+    func testRegisteredSpeciesSurvivesDatabaseSnapshotAndRestoreWithoutEquation() throws {
+        let src = try makeWorld()
+        let (project, _, tree) = try seed(src)
+        let s = try SpeciesRegistration.make(commonName: "Synthetic registered oak", scientificName: "Testus synthetic", existing: [])
+        _ = try src.speciesRepo.create(s.unconfigured)
+        var assigned = tree; assigned.speciesCode = s.code
+        _ = try src.treeRepo.update(assigned)
+        let (_, bytes, _) = try BackupArchive.export(projectId: project.id, stack: src.stack, appVersion: "test")
+        let dst = try makeWorld()
+        let attachments = FileManager.default.temporaryDirectory.appendingPathComponent("species-test-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: attachments) }
+        _ = try BackupArchive.restore(from: bytes, into: dst.stack, attachmentsDirectory: attachments)
+        let restored = try XCTUnwrap(dst.speciesRepo.read(code: s.code))
+        XCTAssertEqual(SpeciesRecord(restored), s)
+        XCTAssertEqual(restored.volumeEquationId, "")
+        XCTAssertEqual(try dst.treeRepo.read(id: tree.id)?.speciesCode, s.code)
+        XCTAssertEqual(try dst.treeRepo.read(id: tree.id)?.dbhCm, tree.dbhCm)
+    }
+
+    func testRegisteredSpeciesConflictFailsBeforeImportingAnyProject() throws {
+        let src = try makeWorld(); let (project, _, _) = try seed(src)
+        let s = try SpeciesRegistration.make(commonName: "Synthetic species", scientificName: "", existing: [])
+        _ = try src.speciesRepo.create(s.unconfigured)
+        let (_, bytes, _) = try BackupArchive.export(projectId: project.id, stack: src.stack, appVersion: "test")
+        let dst = try makeWorld()
+        _ = try dst.speciesRepo.create(SpeciesRecord(code: s.code, commonName: "Different identity").unconfigured)
+        let attachments = FileManager.default.temporaryDirectory.appendingPathComponent("species-conflict-" + UUID().uuidString)
+        XCTAssertThrowsError(try BackupArchive.restore(from: bytes, into: dst.stack, attachmentsDirectory: attachments))
+        XCTAssertTrue(try dst.projectRepo.list().isEmpty)
+        XCTAssertEqual(try dst.speciesRepo.read(code: s.code)?.commonName, "Different identity")
+    }
+
     func testRoundTripPreservesProjectPlotAndTree() throws {
         let src = try makeWorld()
         let (project, _, _) = try seed(src)

@@ -21,8 +21,17 @@ import AR
 import simd
 
 public struct DBHScanScreen: View {
+    /// A tally advances without rebuilding this screen. Give its next tree
+    /// a fresh Auto window, but do not reset it for a preview/lock dropout.
+    private struct AutoSafetyRun: Equatable {
+        let adjustActive: Bool
+        let treeNumber: Int?
+    }
 
     @StateObject private var viewModel: DBHScanViewModel
+    @StateObject private var fieldCapture = FieldCaptureCoordinator()
+    @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
+    @Environment(\.fieldStudyStore) private var fieldStudyStore
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
     /// App-scoped active sampling plot — rendered as a subdued ring +
@@ -64,6 +73,10 @@ public struct DBHScanScreen: View {
         /// was typed — never a zero, which would read as a tape that
         /// measured nothing.
         public var truth: Double?
+        public var measurementId: String?
+        public var fieldReceipt: FieldResultReceipt?
+        public var fieldTarget: FieldStudyTarget?
+        public var fieldScope: FieldMeasurementScope?
         public init(speciesCode: String? = nil,
                     position: QuickMeasureEntry.StemPosition? = nil,
                     damageCodes: [String] = [],
@@ -72,7 +85,7 @@ public struct DBHScanScreen: View {
                     latitude: Double? = nil,
                     longitude: Double? = nil,
                     captureMode: String? = nil,
-                    truth: Double? = nil) {
+                    truth: Double? = nil, measurementId: String? = nil, fieldReceipt: FieldResultReceipt? = nil,fieldTarget: FieldStudyTarget? = nil,fieldScope: FieldMeasurementScope? = nil) {
             self.speciesCode = speciesCode
             self.position = position
             self.damageCodes = damageCodes
@@ -82,6 +95,9 @@ public struct DBHScanScreen: View {
             self.longitude = longitude
             self.captureMode = captureMode
             self.truth = truth
+            self.measurementId = measurementId; self.fieldReceipt = fieldReceipt
+            self.fieldTarget = fieldTarget
+            self.fieldScope = fieldScope
         }
     }
 
@@ -236,7 +252,9 @@ public struct DBHScanScreen: View {
     private let onRenameTally: (() -> Void)?
     /// Undo tap on the tally toast — the host deletes the just-saved
     /// tree row (and its photo) and steps the auto number back.
-    private let onUndoTally: (() -> Void)?
+    private let onUndoTally: (() async throws -> Void)?
+    @State private var tallyUndoBusy = false
+    @State private var tallyUndoFailed = false
 
     /// RAW-CAPTURE JOIN KEYS — the project this measurement belongs to, and
     /// (quick-measure only) the tree number the host is targeting. Without
@@ -244,6 +262,13 @@ public struct DBHScanScreen: View {
     /// documents. The cruise tally supplies its number via `tallyTreeNumber`.
     private let projectID: String?
     private let quickTreeNumber: Int?
+    private let quickPlotID: UUID?
+    private let allowsFieldTargetSelection: Bool
+    private let onSelectFieldTarget: ((String) async throws -> Void)?
+    private let fieldTarget: FieldStudyTarget?
+    private let fieldTargetLocked: Bool
+    private let fieldScope: FieldMeasurementScope?
+    private let uiFlow: FieldUIFlowClock?
 
     /// Re-open plot setup, to change radius / centre after the first
     /// placement. Reached from the ENLARGED plot view that the top-right
@@ -289,9 +314,16 @@ public struct DBHScanScreen: View {
                 tallyTreeNumber: Int? = nil,
                 tallyTreeName: String? = nil,
                 onRenameTally: (() -> Void)? = nil,
-                onUndoTally: (() -> Void)? = nil,
+                onUndoTally: (() async throws -> Void)? = nil,
                 projectID: String? = nil,
                 quickTreeNumber: Int? = nil,
+                quickPlotID: UUID? = nil,
+                fieldTarget: FieldStudyTarget? = nil,
+                fieldTargetLocked: Bool = false,
+                fieldScope: FieldMeasurementScope? = nil,
+                uiFlow: FieldUIFlowClock? = nil,
+                allowsFieldTargetSelection: Bool = true,
+                onSelectFieldTarget: ((String) async throws -> Void)? = nil,
                 initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -308,6 +340,12 @@ public struct DBHScanScreen: View {
         self.onUndoTally = onUndoTally
         self.projectID = projectID
         self.quickTreeNumber = quickTreeNumber
+        self.quickPlotID = quickPlotID; self.allowsFieldTargetSelection = allowsFieldTargetSelection
+        self.fieldTarget = fieldTarget
+        self.fieldTargetLocked = fieldTargetLocked
+        self.fieldScope = fieldScope
+        self.uiFlow = uiFlow
+        self.onSelectFieldTarget = onSelectFieldTarget
         self.onEditPlot = onEditPlot
     }
 
@@ -328,6 +366,10 @@ public struct DBHScanScreen: View {
     }
 
     public var body: some View {
+        scanContent.allowsHitTesting(!tallyUndoBusy).modifier(FieldTargetSwitchPresentation(coordinator: fieldTargetSwitch))
+    }
+
+    private var scanContent: some View {
         // Field mode is LiDAR-only for DBH: without the scanner the depth
         // pipeline — now the only sensing path — can't run, so block the
         // scan UI outright instead of starting an AR session the flow can't
@@ -445,6 +487,18 @@ public struct DBHScanScreen: View {
 
             GeometryReader { geo in
                 ZStack {
+                    if !hidingChromeForCapture {
+                        VStack(spacing: 4) {
+                            FieldScanIdentityBadge(coordinator: fieldCapture,kind: .dbh).allowsHitTesting(false)
+                            FieldReferencePeek(capture: fieldCapture,kind: .dbh)
+                            FieldCaptureWarning(coordinator: fieldCapture).allowsHitTesting(false)
+                        }.frame(maxWidth: .infinity,maxHeight: .infinity,alignment: .top)
+                            .padding(.top,110).zIndex(20)
+                    }
+                    if isAiming, !hidingChromeForCapture, !bhGroundPlacementActive {
+                        FieldStudyCameraTargets(raycaster: raycaster,canSelect: allowsFieldTargetSelection,capture: fieldCapture,
+                            onSelect: onSelectFieldTarget == nil ? nil : selectFieldTarget)
+                    }
                     if isAiming, !hidingChromeForCapture, !bhGroundPlacementActive,
                        let mask = viewModel.liveStemMask {
                         liveStemMaskLayer(mask, in: geo.size)
@@ -524,9 +578,9 @@ public struct DBHScanScreen: View {
                        !bhGuide.trackingLost, let point = bhLabelPoint {
                         BreastHeightMarker(point: point, size: geo.size,
                             stemLeft: adjustOverlayVisible
-                                ? geo.size.width * CGFloat(viewModel.edgeBracketLeftFraction) : nil,
+                                ? geo.size.width * CGFloat(displayedBracketLeft) : nil,
                             stemRight: adjustOverlayVisible
-                                ? geo.size.width * CGFloat(viewModel.edgeBracketRightFraction) : nil,
+                                ? geo.size.width * CGFloat(displayedBracketRight) : nil,
                             label: bhGuide.label(in: settings.unitSystem))
                     }
                 }
@@ -673,7 +727,7 @@ public struct DBHScanScreen: View {
                     }
                     if bhGuideChromeVisible { bhGuideButton }
                     if isAiming {
-                        liveValueStrip
+                        liveValueSlot
                         MeasureShutterRow(
                             showsShutter: showsCaptureButton,
                             capture: captureTap,
@@ -794,13 +848,14 @@ public struct DBHScanScreen: View {
         .task(id: tallyToastGeneration) {
             guard tallyToastLabel != nil else { return }
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if !Task.isCancelled {
+            if !Task.isCancelled,!tallyUndoBusy,!tallyUndoFailed {
                 withAnimation(.easeOut(duration: 0.18)) {
                     tallyToastLabel = nil
                 }
             }
         }
-        .task(id: viewModel.edgeAdjustActive) {
+        .task(id: AutoSafetyRun(adjustActive: viewModel.edgeAdjustActive,
+                                treeNumber: captureTreeNumber)) {
             guard !viewModel.edgeAdjustActive else { return }
             autoSafetyNotice = nil
             let started = ProcessInfo.processInfo.systemUptime
@@ -861,10 +916,13 @@ public struct DBHScanScreen: View {
             seedBracketFromRememberedWidth()
             viewModel.edgeAdjustActive = true
             configureRawCapture()
+            fieldCapture.appeared()
             syncBreastHeightGuide()
-            // Start manually; Auto is enabled explicitly by its button.
+            // A new measurement opens in AI Auto; Adjust remains available.
+            // The existing timeout still returns a long-running Auto to Adjust.
             viewModel.stopSegmentationFeed()
             viewModel.onAppear()
+            viewModel.requestAutoAlignment()
         }
         // The wireframe's off-switch — see `showsScanMesh`. Latched, never
         // released: it answers a question that only gets asked once.
@@ -872,6 +930,7 @@ public struct DBHScanScreen: View {
             if has, !hasProducedFit { hasProducedFit = true }
         }
         .onDisappear {
+            fieldCapture.foreground(false); fieldCapture.close()
             hasLeftScreen = true
             // Leaving without accepting: the held frame belongs to a
             // measurement that was never stored, so the file goes with it.
@@ -1025,7 +1084,9 @@ public struct DBHScanScreen: View {
                         // The tape value rides WITH the reading. Read before
                         // `applyTypedTruth` runs, because that call clears the
                         // field once the value is durable on the bundle.
-                        truth: typedTruthForThisMeasurement)
+                        truth: typedTruthForThisMeasurement,measurementId: viewModel.measurementId,
+                        fieldReceipt: viewModel.measurementId.map { fieldCapture.receipt(id: $0) },
+                        fieldTarget: fieldCapture.displayRecord?.targetSnapshot,fieldScope: fieldCapture.displayRecord?.measurementScope)
                     // The host reports whether the reading actually reached
                     // storage. A dropped diameter used to be indistinguishable
                     // from a saved one — the loop reset for the next tree
@@ -1043,9 +1104,8 @@ public struct DBHScanScreen: View {
                     // minted synchronously at burst finalize, so this works
                     // even when Accept beats the detached writer — and the
                     // field is not cleared until the value is durable.
-                    recordResearchRow(r)
-                    applyTypedTruth()
                     guard stored else {
+                        if let id = viewModel.measurementId { fieldCapture.resultSaveFailed(id: id,reason: "application_result_write_failed") }
                         dbhSaveFailure = tallyTreeTitle.map {
                             "Diameter NOT saved as \($0) — the tree row couldn't be written. Tap Accept again."
                         } ?? "Diameter NOT saved — the tree row couldn't be written. Tap Accept again."
@@ -1056,6 +1116,9 @@ public struct DBHScanScreen: View {
                         viewModel.acceptFailed()
                         return
                     }
+                    if let id = meta.measurementId { viewModel.confirmResultStored(id: id) }
+                    recordResearchRow(r)
+                    applyTypedTruth()
                     dbhSaveFailure = nil
                     // CRUISE QUICK-TALLY LOOP — the host saved the tree
                     // and auto-incremented its target; reset this screen
@@ -1069,6 +1132,7 @@ public struct DBHScanScreen: View {
                         metaDamage = []
                         metaNote = ""
                         withAnimation(.easeOut(duration: 0.18)) {
+                            tallyUndoFailed = false
                             tallyToastLabel = saved
                         }
                         tallyToastGeneration += 1
@@ -1083,6 +1147,7 @@ public struct DBHScanScreen: View {
                 note: $metaNote)
         }
         .onChange(of: scenePhase) { _, phase in
+            fieldCapture.foreground(phase == .active)
             // Stop the AR session + depth subscription when the user
             // backgrounds the app — without this the camera, LiDAR,
             // and Combine chain keep running inside a screen that's
@@ -1122,6 +1187,10 @@ public struct DBHScanScreen: View {
                 if let outcome = viewModel.lastCaptureOutcome {
                     RawCaptureOutcomePill(outcome: outcome)
                 }
+                if let warning = viewModel.rawAIRecordingWarning {
+                    Text(warning).font(.caption2).foregroundStyle(.white).padding(6)
+                        .background(.red.opacity(0.8),in: RoundedRectangle(cornerRadius: 6)).frame(maxWidth: 250,alignment: .leading)
+                }
             }
             Spacer()
         }
@@ -1142,10 +1211,18 @@ public struct DBHScanScreen: View {
         }
     }
 
+    private func selectFieldTarget(_ id: String) {
+        guard isAiming,let action = onSelectFieldTarget,fieldTarget?.id != id else { return }
+        fieldTargetSwitch.request(targetId: id,label: fieldStudyStore?.activeTargets.first(where: { $0.id == id })?.treeId ?? "",
+            requiresConfirmation: !researchTrueText.isEmpty || !metaNote.isEmpty || !metaDamage.isEmpty || metaSpecies != nil || bhGuide.stage != .off) {
+                try await action(id)
+            }
+    }
+
     /// Whether the floating "+" capture button is rendered. It stays on
-    /// screen for the whole aiming phase — a no-op until the crosshair
-    /// arms (`viewModel.tap` requires `.armed`) — so the control layout is
-    /// stable while the cruiser lines up.
+    /// screen for the whole aiming phase, so its layout never depends on
+    /// preview lock. Auto validates a fresh frozen input after the tap;
+    /// Adjust retains its existing current-depth capture checks.
     private var showsCaptureButton: Bool {
         switch viewModel.state {
         case .idle, .aligning, .armed: return true
@@ -1174,11 +1251,23 @@ public struct DBHScanScreen: View {
     /// mode only; the VM no-ops recording when disabled). Called on appear,
     /// whenever the tally target changes, and again at every burst start.
     private func configureRawCapture() {
+        fieldCapture.configure(store: fieldStudyStore,kind: .dbh,settings: settings,calibration: viewModel.calibration,context: [
+            "application.mode": cruisePlotInfo != nil ? "cruise" : "quick",
+            "application.project_id": projectID ?? "", "application.plot_id": (cruisePlotInfo?.plotID ?? quickPlotID)?.uuidString ?? "",
+            "application.tree_number": captureTreeNumber.map(String.init) ?? ""],targetOverride: fieldTarget,useGlobalTarget: !fieldTargetLocked,uiFlow: uiFlow,scopeOverride: fieldScope)
+        let coordinator = fieldCapture
+        viewModel.onFieldCaptureEvent = { coordinator.handle($0) }
+        viewModel.fieldCapturePermission = { [weak vm = viewModel] typed,continuing in
+            guard let vm else { return "Measurement screen closed." }
+            return coordinator.capturePermission(typed: typed,continuing: continuing,calibration: vm.calibration,
+                dbhMethod: vm.dbhMeasurementMethod.rawValue,frameCount: vm.captureMode.frameCount(developerMode: vm.developerMode))
+        }
         viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
+        viewModel.rawCapturePreserveAIInputs = fieldStudyStore?.configuration.preserveAiInputs ?? false
         viewModel.rawCaptureContext = RawCaptureContext(
             mode: cruisePlotInfo != nil ? "cruise" : "quick",
             projectID: projectID,
-            plotID: cruisePlotInfo?.plotID?.uuidString,
+            plotID: (cruisePlotInfo?.plotID ?? quickPlotID)?.uuidString,
             treeNumber: captureTreeNumber,
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()
@@ -1355,10 +1444,8 @@ public struct DBHScanScreen: View {
             // it some other way would suggest a second kind of measurement
             // that does not exist. What tells them apart is the caption
             // under the ring, not the geometry.
-            let lo = min(viewModel.edgeBracketLeftFraction,
-                         viewModel.edgeBracketRightFraction)
-            let hi = max(viewModel.edgeBracketLeftFraction,
-                         viewModel.edgeBracketRightFraction)
+            let lo = min(displayedBracketLeft, displayedBracketRight)
+            let hi = max(displayedBracketLeft, displayedBracketRight)
             chordBar(x0: size.width * CGFloat(lo),
                      x1: size.width * CGFloat(hi),
                      in: size)
@@ -1451,7 +1538,7 @@ public struct DBHScanScreen: View {
     /// estimate runs (plus `.capturing`, so the frozen bracket stays
     /// visible through the burst).
     private var adjustOverlayVisible: Bool {
-        guard viewModel.edgeAdjustActive || (viewModel.segmentationDroveTheBracket && viewModel.segmentedExtent != nil)
+        guard viewModel.edgeAdjustActive || (viewModel.segmentationDroveTheBracket && viewModel.liveStemGuideExtent != nil)
         else { return false }
         switch viewModel.state {
         case .idle, .aligning, .armed, .capturing, .rejected: return true
@@ -1459,15 +1546,24 @@ public struct DBHScanScreen: View {
         }
     }
 
+    private var displayedBracketLeft: Double {
+        (viewModel.segmentationDroveTheBracket && viewModel.state != .capturing
+            ? viewModel.liveStemGuideExtent?.leftFraction : nil) ?? viewModel.edgeBracketLeftFraction
+    }
+    private var displayedBracketRight: Double {
+        (viewModel.segmentationDroveTheBracket && viewModel.state != .capturing
+            ? viewModel.liveStemGuideExtent?.rightFraction : nil) ?? viewModel.edgeBracketRightFraction
+    }
+
     /// Two vertical draggable handles + a subtle band between them at
-    /// the guide-line height. The live estimate uses exactly this span.
+    /// the guide-line height. Auto guides are visual feedback until depth approves them.
     @ViewBuilder
     private func adjustHandleLayer(in size: CGSize) -> some View {
         let y = size.height / 2
-        let xL = size.width * CGFloat(min(viewModel.edgeBracketLeftFraction,
-                                          viewModel.edgeBracketRightFraction))
-        let xR = size.width * CGFloat(max(viewModel.edgeBracketLeftFraction,
-                                          viewModel.edgeBracketRightFraction))
+        let left = displayedBracketLeft
+        let right = displayedBracketRight
+        let xL = size.width * CGFloat(min(left, right))
+        let xR = size.width * CGFloat(max(left, right))
         // Subtle highlight of the bracketed span.
         Rectangle()
             .fill(Color.white.opacity(0.10))
@@ -1487,7 +1583,8 @@ public struct DBHScanScreen: View {
                                     width: CGFloat(run.end - run.start) * dx, height: dy))
             }
         }
-        .fill(ForestixPalette.confidenceOk.opacity(0.18))
+        // Translucent detection feedback only; it never grants a capture lock.
+        .fill(Color.green.opacity(0.18))
         .accessibilityIdentifier("dbhScan.liveStemMask")
     }
 
@@ -1533,6 +1630,7 @@ public struct DBHScanScreen: View {
                 // still carries over to the next tree, which was the other
                 // half of the request and the part that saves real time.
                 .onChanged { v in
+                    viewModel.noteUserBoundaryAdjustment()
                     if !viewModel.edgeAdjustActive { viewModel.edgeAdjustActive = true }
                     guard viewWidth > 1 else { return }
                     let frac = min(max(Double(v.location.x / viewWidth),
@@ -1564,6 +1662,7 @@ public struct DBHScanScreen: View {
         .accessibilityHint("Drag to set this edge of the trunk. Each edge moves on its own.")
         // VoiceOver cannot drag, so the width is also reachable in steps.
         .accessibilityAdjustableAction { direction in
+            viewModel.noteUserBoundaryAdjustment()
             // Widen / narrow by moving THIS edge outward or inward.
             let step = 0.01
             let outward = direction == .increment
@@ -1764,6 +1863,7 @@ public struct DBHScanScreen: View {
         .accessibilityLabel(viewModel.crosshairIsStable
                             ? "Locked on the trunk — press the capture button"
                             : "Lining up — move closer or hold steadier")
+        .accessibilityValue(viewModel.cameraAlignmentAccessibilityValue)
     }
 
     /// Fraction of the capture burst completed (0…1) — drives the
@@ -1795,6 +1895,20 @@ public struct DBHScanScreen: View {
     /// cruiser never reads a value the burst would later reject. Phase
     /// 14.4 made the published preview match the burst's quality bar —
     /// the value on screen is the value you can record.
+    /// Reserve both value rows even when depth temporarily has no result.
+    /// Hidden sizing content follows the real typography without showing a
+    /// placeholder value or moving Set ground when either row disappears.
+    private var liveValueSlot: some View {
+        VStack(spacing: 4) {
+            MeasureValuePill("DBH", size: .large)
+                .hidden().accessibilityHidden(true)
+            MeasureValuePill("Distance", dimmed: true)
+                .hidden().accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity)
+        .overlay { liveValueStrip }
+    }
+
     @ViewBuilder
     private var liveValueStrip: some View {
         if let cm = viewModel.previewDbhCm {
@@ -1866,8 +1980,17 @@ public struct DBHScanScreen: View {
                 .foregroundStyle(.white)
                 .lineLimit(1)
             Button {
-                onUndoTally?()
-                tallyToastLabel = nil
+                guard isAiming,!tallyUndoBusy else { return }
+                tallyUndoBusy = true
+                tallyUndoFailed = false
+                Task { @MainActor in
+                    defer { tallyUndoBusy = false }
+                    do { try await onUndoTally?(); tallyToastLabel = nil }
+                    catch {
+                        tallyUndoFailed = true; tallyToastLabel = title
+                        fieldTargetSwitch.error = "Undo not completed: "+error.localizedDescription
+                    }
+                }
             } label: {
                 Text("Undo")
                     .font(.system(size: 14, weight: .bold))
@@ -2250,6 +2373,8 @@ public struct DBHScanScreen: View {
         // had to retype. Same value the raw-capture bundle and the saved
         // reading carry, so the three join.
         f["tree_id"] = captureTreeNumber.map(String.init) ?? ""
+        f["measurement_id"] = viewModel.measurementId ?? ""
+        f["save_event"] = "saved"
         if let d = viewModel.distanceToStemCenterM {
             f["distance_m"] = String(format: "%.2f", d)
         }
@@ -2496,9 +2621,6 @@ public struct DBHScanScreen: View {
                     }
                     // Developer mode on, recording off ⇒ this session is
                     // producing NO corpus. Say so where the truth is typed.
-                    if !settings.rawCaptureEnabled {
-                        RawCaptureOffNotice()
-                    }
                 }
             }
         }
@@ -2570,17 +2692,30 @@ public struct DBHScanScreen: View {
         // previous burst's file behind on disk.
         discardHeldPhoto()
         hidingChromeForCapture = true
-        try? await Task.sleep(for: .milliseconds(80))
+        let capturedGeneration = viewModel.resultGeneration
+        let capturedID = viewModel.measurementId
+        if viewModel.resultCaptureMode != "segmented" {
+            try? await Task.sleep(for: .milliseconds(80))
+        }
         // THE SCREEN CAN BE LEFT INSIDE THAT SLEEP (the cruiser backs out,
         // the host dismisses the cover). This task is unstructured, so it
         // would still run: it would photograph whatever replaced this screen
         // and write a file that no reading and no `onDisappear` would ever
         // delete — an orphan in the photo store. Nothing is captured instead.
-        guard !hasLeftScreen else {
+        guard !hasLeftScreen, viewModel.resultGeneration == capturedGeneration,
+              viewModel.measurementId == capturedID else {
             hidingChromeForCapture = false
             return
         }
-        let shot = MeasurePhotoStore.captureWindow()
+        let shot: HeldMeasurePhoto?
+        if viewModel.resultCaptureMode == "segmented" {
+            if let reference = viewModel.snapshotReference, let guide = viewModel.snapshotGuide {
+                shot = MeasurePhotoStore.captureSnapshot(reference,mask: viewModel.snapshotMask,
+                    guide: guide,viewport: viewModel.snapshotViewSize)
+            } else { shot = nil } // Never substitute a later live photograph.
+        } else {
+            shot = MeasurePhotoStore.captureWindow()
+        }
         // Held IMMEDIATELY, before the bytes are on disk: an Accept tapped
         // while the JPEG is still encoding must attach this frame, not
         // nothing. The store keeps writing under this name regardless of who

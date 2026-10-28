@@ -26,6 +26,33 @@ public enum RawCaptureReplay {
     /// Relative tolerance for the self-check pass/fail decision.
     public static let tolerance: Double = 1e-3
 
+    public static func rerunCapturedDBH(manifest: RawCaptureManifest,id: String) throws -> Double? {
+        guard let evidence = manifest.captureEvidence else { return nil }
+        guard (1...2).contains(evidence.version),evidence.measurementId == id,manifest.measurementId == id,
+              !evidence.frames.isEmpty,evidence.frames.count <= 32,
+              evidence.frames.enumerated().allSatisfy({ $0.element.role == "dbh_\($0.offset)" }),
+              evidence.version >= 2 || evidence.frames.allSatisfy({ ($0.depthInputPolicy ?? DBHMeasurementDepth.legacy) == DBHMeasurementDepth.legacy }) else {
+            throw FieldStudyError.invalid("recorded DBH input identity")
+        }
+        let dir = RawCaptureStore.bundleDirectory(id: id)
+        let frames = try evidence.frames.map { try RawCaptureEvidenceIO.readFrame($0,directory: dir) }
+        return rerunDBH(manifest: manifest,id: id,recordedFrames: frames).map { Double($0.diameterCm) }
+    }
+    public static func rerunCapturedHeight(manifest: RawCaptureManifest) throws -> Double? {
+        guard let evidence = manifest.captureEvidence else { return nil }
+        guard evidence.version == 1,evidence.measurementId == manifest.measurementId else {
+            throw FieldStudyError.invalid("recorded height input identity")
+        }
+        let v = evidence.scalars
+        let names = ["anchor_x","anchor_y","anchor_z","standing_x","standing_y","standing_z","alpha_top_rad","alpha_base_rad"]
+        guard names.allSatisfy({ v[$0]?.isFinite == true }) else { throw FieldStudyError.invalid("recorded height scalars") }
+        let input = HeightMeasureInput(anchorPointWorld: SIMD3(Float(v["anchor_x"]!),Float(v["anchor_y"]!),Float(v["anchor_z"]!)),
+            standingPointWorld: SIMD3(Float(v["standing_x"]!),Float(v["standing_y"]!),Float(v["standing_z"]!)),
+            alphaTopRad: Float(v["alpha_top_rad"]!),alphaBaseRad: Float(v["alpha_base_rad"]!),trackingStateWasNormalThroughout: true,
+            projectCalibration: calibration(from: manifest.settings.calibration))
+        return Double(HeightEstimator.estimate(input: input).heightM)
+    }
+
     // MARK: DBH
 
     /// The estimator inputs reconstructed once from a DBH bundle's stored
@@ -44,19 +71,41 @@ public enum RawCaptureReplay {
     /// depth+intrinsics+pose bytes. Returns nil only when the bundle can't
     /// be reconstructed (missing depth files, empty frame list).
     public static func reconstructDBHInputs(
-        manifest m: RawCaptureManifest, id: String) -> DBHReplayInputs? {
-        guard let dbh = m.dbh, !dbh.frames.isEmpty else { return nil }
+        manifest m: RawCaptureManifest, id: String, recordedFrames: [ARDepthFrame]? = nil) -> DBHReplayInputs? {
+        guard let dbh = m.dbh, (1...32).contains(dbh.frames.count),
+              dbh.frames.allSatisfy({ meta in
+                  (1...4096).contains(meta.width) && (1...4096).contains(meta.height) &&
+                  meta.width * meta.height <= 4 * 1024 * 1024 &&
+                  meta.cameraPose.count == 16 && meta.cameraPose.allSatisfy(\.isFinite) &&
+                  [meta.fx,meta.fy,meta.cx,meta.cy].allSatisfy(\.isFinite) &&
+                  (meta.viewToDepth.isEmpty || (meta.viewToDepth.count == 6 && meta.viewToDepth.allSatisfy(\.isFinite))) &&
+                  meta.tapPx.count == 2 && meta.tapPx.allSatisfy(\.isFinite) && ["row","col"].contains(meta.axis) &&
+                  DBHMeasurementDepth.recognized(meta.depthInputPolicy ?? DBHMeasurementDepth.legacy) &&
+                  ((meta.depthInputPolicy ?? DBHMeasurementDepth.legacy) == DBHMeasurementDepth.legacy || meta.confidenceFile != nil)
+              }) else { return nil }
         let dir = RawCaptureStore.bundleDirectory(id: id)
 
         var frames: [ARDepthFrame] = []
         frames.reserveCapacity(dbh.frames.count)
-        for meta in dbh.frames {
-            let count = meta.width * meta.height
-            guard let depth = RawCaptureStore.readDepth(
-                url: dir.appendingPathComponent(meta.depthFile), count: count)
-            else { return nil }
-            frames.append(RawCaptureFrame.reconstruct(from: meta, depth: depth))
+        if let recordedFrames {
+            guard recordedFrames.count == dbh.frames.count,
+                  zip(recordedFrames,dbh.frames).allSatisfy({ $0.width == $1.width && $0.height == $1.height &&
+                      $0.dbhDepthInputPolicy == ($1.depthInputPolicy ?? DBHMeasurementDepth.legacy) }) else { return nil }
+            // Validated modern evidence is sufficient. Do not require an
+            // additional legacy copy of the same input to exist as well.
+            frames = recordedFrames
+        } else {
+            for meta in dbh.frames {
+                guard let grid = try? RawDepthGridIO.read(directory: dir,width: meta.width,height: meta.height,
+                    format: meta.format,depthFile: meta.depthFile,confidenceFile: meta.confidenceFile) else { return nil }
+                frames.append(RawCaptureFrame.reconstruct(from: meta,depth: grid.depth,confidence: grid.confidence))
+            }
         }
+
+        guard DBHMeasurementDepth.acceptsWindow(frames) else { return nil }
+        if let policy = m.settings.dbhDepthInputPolicy,policy != frames[0].dbhDepthInputPolicy { return nil }
+        if let epoch = m.settings.dbhDepthCalibrationEpoch,
+           epoch != DBHMeasurementDepth.calibrationEpoch(frames[0].dbhDepthInputPolicy) { return nil }
 
         // Tap + axis reconstruct exactly from the stored per-frame metadata
         // (pickGuideAxis derives the fixed row/col from the tap, so
@@ -74,19 +123,20 @@ public enum RawCaptureReplay {
     /// manual bracket). This is the reproducibility-self-check path — it
     /// re-runs ONLY the algorithm recorded in the manifest, unchanged.
     /// Returns nil only when the bundle can't be reconstructed.
-    public static func rerunDBH(manifest m: RawCaptureManifest, id: String) -> DBHResult? {
-        guard let inp = reconstructDBHInputs(manifest: m, id: id) else { return nil }
+    public static func rerunDBH(manifest m: RawCaptureManifest, id: String, recordedFrames: [ARDepthFrame]? = nil) -> DBHResult? {
+        guard let inp = reconstructDBHInputs(manifest: m, id: id, recordedFrames: recordedFrames) else { return nil }
+        let frames = inp.frames
 
         if inp.bracket.enabled {
             return DBHEstimator.bracketChordEstimate(
-                frames: inp.frames,
+                frames: frames,
                 guideAxis: inp.axis,
                 leftFraction: inp.bracket.left,
                 rightFraction: inp.bracket.right,
                 calibration: inp.cal)
         }
         let input = DBHScanInput(
-            frames: inp.frames, tapPixel: inp.tap, guideAxis: inp.axis,
+            frames: frames, tapPixel: inp.tap, guideAxis: inp.axis,
             projectCalibration: inp.cal)
         switch m.settings.algorithm {
         case "arc": return DBHEstimator.estimate(input: input)
@@ -652,23 +702,30 @@ public enum RawCaptureRecorder {
         captureManual: Bool,
         context: RawCaptureContext,
         referenceJPEG: Data?,
-        gps: RawCaptureGPS?
+        gps: RawCaptureGPS?,
+        referenceImageMetadata: RawCapturedImage? = nil,
+        captureEvidence: RawCaptureEvidence? = nil,
+        aiRequest: RawAIWriteRequest? = nil
     ) -> RawCaptureOutcome {
-        guard let first = frames.first else {
+        defer { aiRequest?.cancel() }
+        guard !frames.isEmpty else {
             return .failed(reason: "no depth frames in the burst")
         }
         let dir = RawCaptureStore.bundleDirectory(id: id)
         do {
             try RawCaptureStore.assertStorageAvailable()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try RawCaptureWriteGuard.claim(directory: dir,id: id,kind: "dbh")
         } catch {
             return .failed(reason: message(error))
         }
 
         // Canonicalize: derive confidence from depth (shared cross-platform
         // rule) so the stored bytes fully determine the estimator input.
-        let canon = frames.map { RawCaptureFrame.canonicalized($0) }
-        let canonFirst = RawCaptureFrame.canonicalized(first)
+        guard DBHMeasurementDepth.acceptsWindow(frames) else {
+            return .failed(reason: "Mixed or unsupported DBH depth input policies" + RawCaptureStore.preserveFailedBundle(id:id))
+        }
+        let canon = frames.map { $0.dbhDepthInputPolicy == DBHMeasurementDepth.legacy ? RawCaptureFrame.canonicalized($0) : $0 }
+        let canonFirst = canon[0]
         let axis = guideAxis ?? DBHEstimator.pickGuideAxis(
             frame: canonFirst, tapPixel: tapPixel, calibration: calibration)
 
@@ -687,13 +744,18 @@ public enum RawCaptureRecorder {
         var frameMetas: [RawCaptureManifest.DBHBundle.Frame] = []
         for (i, f) in canon.enumerated() {
             let name = RawCaptureStore.depthFileName(i)
+            // Reuse the modern evidence's byte-identical confidence file;
+            // do not store a second full confidence map for one input.
+            let confidenceFile = f.dbhDepthInputPolicy == DBHMeasurementDepth.legacy ? nil : "input_dbh_\(i).conf"
             do {
                 try RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(name))
+                if let confidenceFile {
+                    try Data(f.confidence).write(to:dir.appendingPathComponent(confidenceFile),options:.atomic)
+                }
             } catch {
-                // Tearing the bundle down also destroys a truth/Accept the
-                // operator has already been told is queued — say so.
+                // Keep partial payloads and queued input for recovery/export.
                 return .failed(reason: message(error)
-                               + RawCaptureStore.discardFailedBundle(id: id))
+                               + RawCaptureStore.preserveFailedBundle(id: id))
             }
             frameMetas.append(.init(
                 depthFile: name,
@@ -717,7 +779,9 @@ public enum RawCaptureRecorder {
                 // measurement, so a bundle could not be used to detect the
                 // error either. Bundles recorded before this carry
                 // `[1,0,0,0,1,0]` and cannot be trusted for bracket replay.
-                viewToDepth: f.viewMapping?.flattened ?? [1, 0, 0, 0, 1, 0]))
+                viewToDepth: f.viewMapping?.flattened ?? [1, 0, 0, 0, 1, 0],
+                confidenceFile:confidenceFile,
+                depthInputPolicy:f.dbhDepthInputPolicy == DBHMeasurementDepth.legacy ? nil : f.dbhDepthInputPolicy))
         }
 
         // Reference RGB (first burst frame's camera image, ~80% quality).
@@ -753,17 +817,39 @@ public enum RawCaptureRecorder {
             resultLive: resultLive,
             gps: gps)
         manifest.dbh = .init(frames: frameMetas, bracket: bracket, rgbFile: rgbFile)
+        if canonFirst.dbhDepthInputPolicy != DBHMeasurementDepth.legacy {
+            manifest.settings.dbhDepthInputPolicy = canonFirst.dbhDepthInputPolicy
+            manifest.settings.dbhDepthCalibrationEpoch = DBHMeasurementDepth.calibrationEpoch(canonFirst.dbhDepthInputPolicy)
+        }
+        manifest.measurementId = id
+        if var evidence = captureEvidence {
+            do {
+                guard evidence.measurementId == id,frames.count <= 32 else { throw FieldStudyError.invalid("raw evidence identity/count") }
+                if frames.contains(where:{ $0.dbhDepthInputPolicy != DBHMeasurementDepth.legacy }) { evidence.version = 2 }
+                evidence.frames = try frames.enumerated().map { try RawCaptureEvidenceIO.writeFrame($0.element,role: "dbh_\($0.offset)",directory: dir) }
+                evidence.images = try RawCaptureEvidenceIO.attachImage(referenceImageMetadata,data: referenceJPEG,file: rgbFile,role: "dbh_reference",directory: dir).map { [$0] } ?? []
+                if let request = aiRequest {
+                    let recorded = request.write(to: dir)
+                    evidence.aiInference = recorded.inference; evidence.aiEvidenceStatus = recorded.status; evidence.aiEvidenceReason = recorded.reason
+                }
+                manifest.captureEvidence = evidence
+            } catch { return .failed(reason: message(error)+RawCaptureStore.preserveFailedBundle(id: id)) }
+        }
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
         do {
             try RawCaptureStore.writeManifest(manifest, id: id)
         } catch {
             return .failed(reason: message(error)
-                           + RawCaptureStore.discardFailedBundle(id: id))
+                           + RawCaptureStore.preserveFailedBundle(id: id))
         }
 
         // Reproducibility self-check: reload from disk + re-run.
-        let reran = RawCaptureStore.loadManifest(id: id)
-            .flatMap { RawCaptureReplay.rerunDBH(manifest: $0, id: id) }
+        let reloaded = RawCaptureStore.loadManifest(id: id)
+        let reran = reloaded.flatMap { RawCaptureReplay.rerunDBH(manifest: $0,id: id) }
+        if var evidence = manifest.captureEvidence,let reloaded {
+            do { evidence.noteReplay(try RawCaptureReplay.rerunCapturedDBH(manifest: reloaded,id: id)); manifest.captureEvidence = evidence }
+            catch { return .failed(reason: message(error)) }
+        }
         manifest.replaySelfcheck = RawCaptureReplay.evaluate(
             rerun: reran.map { Double($0.diameterCm) }, live: liveValue)
         do {
@@ -854,12 +940,15 @@ public enum RawCaptureRecorder {
         baseFrame: ARDepthFrame? = nil,
         baseJPEG: Data? = nil,
         topFrame: ARDepthFrame? = nil,
-        topJPEG: Data? = nil
+        topJPEG: Data? = nil,
+        baseImageMetadata: RawCapturedImage? = nil,
+        topImageMetadata: RawCapturedImage? = nil,
+        captureEvidence: RawCaptureEvidence? = nil
     ) -> RawCaptureOutcome {
         let dir = RawCaptureStore.bundleDirectory(id: id)
         do {
             try RawCaptureStore.assertStorageAvailable()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try RawCaptureWriteGuard.claim(directory: dir,id: id,kind: "height")
         } catch {
             return .failed(reason: message(error))
         }
@@ -884,7 +973,7 @@ public enum RawCaptureRecorder {
             // Tearing the bundle down also destroys a truth/Accept the
             // operator has already been told is queued — say so.
             return .failed(reason: message(error)
-                           + RawCaptureStore.discardFailedBundle(id: id))
+                           + RawCaptureStore.preserveFailedBundle(id: id))
         }
 
         let liveResult = HeightEstimator.estimate(input: HeightMeasureInput(
@@ -898,7 +987,7 @@ public enum RawCaptureRecorder {
         // tier_ok = record-time quality gate; operator_accepted is set later
         // by markAccepted when the cruiser taps Accept (S8, both platforms).
         let tierOK = liveResult.confidence != .red
-        let aimFrames = [baseAimExtra, topAimExtra].compactMap { $0 }.count
+        let aimFrames = [baseAimExtra, topAimExtra].compactMap { $0?.depthFile }.count
         let resultLive = RawCaptureManifest.ResultLive(
             value: Double(liveResult.heightM),
             // The bundle now carries the REAL σ for red fits too — a red
@@ -943,12 +1032,29 @@ public enum RawCaptureRecorder {
                 .init(tMs: $0.tMs, pose: RawCaptureMatrix.flat($0.pose))
             },
             trackingDropped: trackingDropped)
+        manifest.measurementId = id
+        if var evidence = captureEvidence {
+            do {
+                guard evidence.measurementId == id else { throw FieldStudyError.invalid("raw evidence identity") }
+                evidence.frames = try [("base",baseFrame),("top",topFrame)].compactMap { role,frame in
+                    try frame.map { try RawCaptureEvidenceIO.writeFrame($0,role: role,directory: dir) }
+                }
+                evidence.images = try [
+                    RawCaptureEvidenceIO.attachImage(baseImageMetadata,data: baseJPEG,file: baseAimExtra?.rgbFile,role: "base",directory: dir),
+                    RawCaptureEvidenceIO.attachImage(topImageMetadata,data: topJPEG,file: topAimExtra?.rgbFile,role: "top",directory: dir)
+                ].compactMap { $0 }
+                evidence.scalars = ["alpha_base_rad":Double(basePitchRad),"alpha_top_rad":Double(topPitchRad),
+                    "anchor_x":Double(anchorWorld.x),"anchor_y":Double(anchorWorld.y),"anchor_z":Double(anchorWorld.z),
+                    "standing_x":Double(baseStanding.x),"standing_y":Double(baseStanding.y),"standing_z":Double(baseStanding.z)]
+                manifest.captureEvidence = evidence
+            } catch { return .failed(reason: message(error)+RawCaptureStore.preserveFailedBundle(id: id)) }
+        }
         manifest.replaySelfcheck = .init(status: "fail", rerunValue: nil, delta: nil)
         do {
             try RawCaptureStore.writeManifest(manifest, id: id)
         } catch {
             return .failed(reason: message(error)
-                           + RawCaptureStore.discardFailedBundle(id: id))
+                           + RawCaptureStore.preserveFailedBundle(id: id))
         }
 
         // Self-check against the stored-d_h re-run. The pose-reposed
@@ -959,6 +1065,10 @@ public enum RawCaptureRecorder {
            let rerun = RawCaptureReplay.rerunHeight(manifest: reloaded) {
             manifest.replaySelfcheck = RawCaptureReplay.evaluate(
                 rerun: Double(rerun.result.heightM), live: liveValue)
+            if var evidence = manifest.captureEvidence {
+                do { evidence.noteReplay(try RawCaptureReplay.rerunCapturedHeight(manifest: reloaded)); manifest.captureEvidence = evidence }
+                catch { return .failed(reason: message(error)) }
+            }
         }
         do {
             try RawCaptureStore.commitManifestFoldingTruth(manifest, id: id)
@@ -969,6 +1079,37 @@ public enum RawCaptureRecorder {
     }
 
     // MARK: Shared
+
+    public static func recordRefusedAttempt(id: String,calibration: ProjectCalibration,context: RawCaptureContext,gps: RawCaptureGPS?,
+                                            evidence: RawCaptureEvidence,aiRequest: RawAIWriteRequest,
+                                            snapshot: ARDepthFrame? = nil,reference: RawCameraJPEG? = nil) -> RawCaptureOutcome {
+        defer { aiRequest.cancel() }
+        let dir = RawCaptureStore.bundleDirectory(id: id)
+        do {
+            guard evidence.measurementId == id,!evidence.displayedResult.valid,evidence.attemptFailureReason != nil else {
+                throw FieldStudyError.invalid("refused-attempt evidence identity")
+            }
+            try RawCaptureStore.assertStorageAvailable()
+            try RawCaptureWriteGuard.claim(directory: dir,id: id,kind: "attempt_only")
+            var stored = evidence; let recorded = aiRequest.write(to: dir)
+            stored.aiInference = recorded.inference; stored.aiEvidenceStatus = recorded.status; stored.aiEvidenceReason = recorded.reason
+            if let snapshot {
+                stored.frames = [try RawCaptureEvidenceIO.writeFrame(snapshot,role: "shutter_refused",directory: dir)]
+                if snapshot.dbhDepthInputPolicy != DBHMeasurementDepth.legacy { stored.version = 2 }
+            }
+            if let reference {
+                stored.images = try RawCaptureEvidenceIO.attachImage(reference.metadata,data: reference.data,
+                    file: nil,role: "shutter_reference",directory: dir).map { [$0] }
+            }
+            var manifest = baseManifest(kind: "dbh",context: context,algorithm: "not_measured",captureMode: "attempt_only",calibration: calibration,
+                resultLive: .init(value: 0,sigma: 0,tier: "red",accepted: false,tierOk: false,frameCount: 0,perFrame: []),gps: gps)
+            manifest.measurementId = id; manifest.captureEvidence = stored
+            manifest.replaySelfcheck = .init(status: "not_applicable",rerunValue: nil,delta: nil)
+            try RawCaptureStore.commitManifestFoldingTruth(manifest,id: id)
+            let complete = recorded.status == "saved" || (snapshot != nil && ["not_requested","no_inference"].contains(recorded.status))
+            return complete ? .saved(id: id,frames: snapshot == nil ? 0 : 1) : .failed(reason: "AI attempt input "+recorded.status+": "+(recorded.reason ?? "unavailable"))
+        } catch { return .failed(reason: message(error)) }
+    }
 
     static func baseManifest(
         kind: String,
@@ -1027,36 +1168,40 @@ public enum RawCaptureRecorder {
 
     /// Metadata for one written aim frame — mirrors the DBH frame keys.
     struct AimFrameExtra {
-        let depthFile: String
+        let depthFile: String?
         let rgbFile: String?
-        let width: Int
-        let height: Int
-        let fx: Double
-        let fy: Double
-        let cx: Double
-        let cy: Double
+        let width: Int?
+        let height: Int?
+        let fx: Double?
+        let fy: Double?
+        let cx: Double?
+        let cy: Double?
     }
 
     /// Write `depth_<prefix>.bin` (row-major f32 metres, same format the DBH
-    /// path uses) and, when present, `rgb_<prefix>.jpg`. Returns nil when no
-    /// frame was captured, which keeps the aim schema-1-shaped (tangent only).
+    /// path uses) and, independently, `rgb_<prefix>.jpg`. Returns nil when
+    /// neither input exists. A missing depth frame never discards available RGB.
     /// Throws on a real IO failure — a half-written aim frame must not pass
     /// for a complete bundle.
     static func writeAimFrame(prefix: String, frame: ARDepthFrame?,
                               jpeg: Data?, dir: URL) throws -> AimFrameExtra? {
-        guard let f = frame else { return nil }
-        let depthName = "depth_\(prefix).bin"
-        try RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(depthName))
+        var depthName: String?
+        if let f = frame {
+            let name = "depth_\(prefix).bin"
+            try RawCaptureStore.writeDepth(f.depth, to: dir.appendingPathComponent(name))
+            depthName = name
+        }
         var rgbName: String?
         if let jpeg {
             let name = "rgb_\(prefix).jpg"
             if (try? jpeg.write(to: dir.appendingPathComponent(name))) != nil { rgbName = name }
         }
+        guard depthName != nil || rgbName != nil else { return nil }
         return AimFrameExtra(
             depthFile: depthName, rgbFile: rgbName,
-            width: f.width, height: f.height,
-            fx: Double(f.intrinsics[0, 0]), fy: Double(f.intrinsics[1, 1]),
-            cx: Double(f.intrinsics[2, 0]), cy: Double(f.intrinsics[2, 1]))
+            width: frame?.width, height: frame?.height,
+            fx: frame.map { Double($0.intrinsics[0, 0]) }, fy: frame.map { Double($0.intrinsics[1, 1]) },
+            cx: frame.map { Double($0.intrinsics[2, 0]) }, cy: frame.map { Double($0.intrinsics[2, 1]) })
     }
 
     /// Build a height `Aim` with the schema-2 aim-frame keys populated from
@@ -1067,7 +1212,7 @@ public enum RawCaptureRecorder {
             pitchDeg: pitchDeg, cameraPose: cameraPose,
             depthFile: extra?.depthFile, rgbFile: extra?.rgbFile,
             width: extra?.width, height: extra?.height,
-            format: extra == nil ? nil : "f32m",
+            format: extra?.depthFile == nil ? nil : "f32m",
             fx: extra?.fx, fy: extra?.fy, cx: extra?.cx, cy: extra?.cy)
     }
 }

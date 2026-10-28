@@ -274,7 +274,7 @@ object BackupArchive {
         }
 
         try {
-            return copyInto(env, srcDb, entries, restoredMediaDir(context), sourceName)
+            return copyInto(env, srcDb, entries, restoredMediaDir(context), sourceName).also { env.speciesCatalog.refresh() }
         } catch (e: BackupError) {
             throw e
         } catch (e: Exception) {
@@ -310,6 +310,13 @@ object BackupArchive {
         val srcHDFitRepo = RoomHeightDiameterFitRepository(srcDb.heightDiameterFitDao())
 
         val liveProjectIds = env.projectRepository.list().map { it.id }.toSet()
+        val localSpecies = env.speciesConfigRepository.list().associateBy { it.code }
+        for (s in srcSpeciesRepo.list().filter { it.code.startsWith("USR-") }) {
+            val old = localSpecies[s.code]
+            require(old == null || com.hcjeong.forestix.common.SpeciesRecord(old) == com.hcjeong.forestix.common.SpeciesRecord(s)) {
+                com.hcjeong.forestix.common.SpeciesRegistration.CONFLICT
+            }
+        }
 
         val imported = mutableListOf<UUID>()
         var plotCount = 0

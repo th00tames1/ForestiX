@@ -43,7 +43,7 @@ public enum HeightMethod: String, Codable, Sendable {
 
 // MARK: - §6.2 Tree
 
-public struct Tree: Identifiable, Codable, Sendable {
+public struct Tree: Identifiable, Codable, Sendable, Equatable {
     public let id: UUID
     /// The plot this tree is filed under — and, through that plot, the
     /// project. `var` rather than `let` because the field log can re-file a
@@ -130,6 +130,10 @@ public struct Tree: Identifiable, Codable, Sendable {
     // trees recorded without a fix simply don't appear on the map.
     public var latitude: Double?
     public var longitude: Double?
+    /// Exact per-kind attempt IDs. nil remains legacy/unrecorded; never infer
+    /// an identity from the tree number, value or timestamp.
+    public var dbhMeasurementId: String?
+    public var heightMeasurementId: String?
 
     public init(
         id: UUID,
@@ -170,9 +174,12 @@ public struct Tree: Identifiable, Codable, Sendable {
         updatedAt: Date,
         deletedAt: Date?,
         latitude: Double? = nil,
-        longitude: Double? = nil
+        longitude: Double? = nil,
+        dbhMeasurementId: String? = nil,
+        heightMeasurementId: String? = nil
     ) {
         self.id = id
+        self.dbhMeasurementId = dbhMeasurementId; self.heightMeasurementId = heightMeasurementId
         self.plotId = plotId
         self.treeNumber = treeNumber
         self.treeName = treeName

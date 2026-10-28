@@ -55,6 +55,21 @@ public final class HeightScanViewModel: ObservableObject {
     /// still on the crown — rather than at Accept, by which time it is
     /// pointing at the ground.
     @Published public private(set) var resultGeneration: Int = 0
+    @Published public private(set) var measurementId: String?
+    public var onFieldCaptureEvent: (@MainActor @Sendable (FieldCaptureEvent) -> Void)?
+    public var fieldCapturePermission: (@MainActor @Sendable (_ typed: Bool,_ continuing: Bool) -> String?)?
+    private func mayContinueFieldCapture() -> Bool {
+        guard let reason = fieldCapturePermission?(false,true) else { return true }
+        anchorFailureReason = reason
+        if let measurementId { onFieldCaptureEvent?(.stageRefused(id: measurementId,stage: "protocol",reason: reason)) }
+        return false
+    }
+    @discardableResult private func beginFieldCapture(typed: Bool = false) -> String? {
+        if let reason = fieldCapturePermission?(typed,false) { anchorFailureReason = reason; return nil }
+        let id = UUID().uuidString; measurementId = id
+        onFieldCaptureEvent?(.started(id: id,rawRequested: rawCaptureEnabled,aiEnabled: false,typed: typed))
+        return id
+    }
 
     /// Live horizontal distance from the anchor to the current standing
     /// pose (REQ-HGT-003). Updates at the ARKit frame rate.
@@ -381,8 +396,10 @@ public final class HeightScanViewModel: ObservableObject {
     // later re-run depth-based height algorithms, not just tangent.
     private var recordBaseFrame: ARDepthFrame?
     private var recordBaseJPEG: Data?
+    private var recordBaseImageMetadata: RawCapturedImage?
     private var recordTopFrame: ARDepthFrame?
     private var recordTopJPEG: Data?
+    private var recordTopImageMetadata: RawCapturedImage?
 
     // MARK: - Construction
 
@@ -708,14 +725,16 @@ public final class HeightScanViewModel: ObservableObject {
     private func retainBaseAimFrame() {
         guard rawCaptureEnabled else { return }
         recordBaseFrame = session.latestDepthFrame
-        recordBaseJPEG = session.currentCameraImageJPEG()
+        let image = session.currentCameraImageJPEGSnapshot()
+        recordBaseJPEG = image?.data; recordBaseImageMetadata = image?.metadata
     }
 
     /// Retain the top-aim depth frame + reference RGB (developer mode only).
     private func retainTopAimFrame() {
         guard rawCaptureEnabled else { return }
         recordTopFrame = session.latestDepthFrame
-        recordTopJPEG = session.currentCameraImageJPEG()
+        let image = session.currentCameraImageJPEGSnapshot()
+        recordTopJPEG = image?.data; recordTopImageMetadata = image?.metadata
     }
 
     /// Read the current ARKit camera translation in world space. Falls
@@ -766,6 +785,8 @@ public final class HeightScanViewModel: ObservableObject {
     /// algorithm only cares about the horizontal distance between them.
     public func anchorHere(anchorPointWorld: SIMD3<Float>,
                            standingPointWorld: SIMD3<Float>) {
+        if measurementId == nil { guard beginFieldCapture() != nil else { return } }
+        else { guard mayContinueFieldCapture() else { return } }
         self.anchorPointWorld = anchorPointWorld
         // Pin the trunk with a REAL ARKit anchor so its position is re-read
         // from ARKit's drift-corrected transform for the rest of the walk-off
@@ -801,8 +822,8 @@ public final class HeightScanViewModel: ObservableObject {
         // clock reference (developer mode only).
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
-        recordBaseFrame = nil; recordBaseJPEG = nil
-        recordTopFrame = nil; recordTopJPEG = nil
+        recordBaseFrame = nil; recordBaseJPEG = nil; recordBaseImageMetadata = nil
+        recordTopFrame = nil; recordTopJPEG = nil; recordTopImageMetadata = nil
         recordAnchorPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
         state = .anchorSet
@@ -840,6 +861,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// to the top in one continuous motion — less device rotation than
     /// top-then-base, so we arm the BASE aim first.
     public func continueToAimTop() {
+        guard mayContinueFieldCapture() else { return }
         guard state == .walking, anchorPointWorld != nil else { return }
         // d_h freezes here, so it has to be the distance AT THE TAP. The walk
         // panel is published at 10 Hz; the standing point behind it is
@@ -856,6 +878,7 @@ public final class HeightScanViewModel: ObservableObject {
     public func captureBase(at tapTime: TimeInterval,
                             standingPointWorld: SIMD3<Float>,
                             aimedAtWorld: SIMD3<Float>? = nil) {
+        guard mayContinueFieldCapture() else { return }
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
@@ -877,6 +900,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// Triggers estimation. `aimedAtWorld` seeds the top marker.
     public func captureTop(at tapTime: TimeInterval,
                            aimedAtWorld: SIMD3<Float>? = nil) {
+        guard mayContinueFieldCapture() else { return }
         guard state == .aimTopArmed, anchorPointWorld != nil,
               alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
@@ -956,6 +980,15 @@ public final class HeightScanViewModel: ObservableObject {
     /// missing hit → inert, missing pose → this banner).
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil,
                               hitType: String = "unknown") {
+        if measurementId != nil { guard mayContinueFieldCapture() else { return } }
+        guard let id = measurementId ?? beginFieldCapture() else { return }
+        var placed = false
+        defer {
+            if !placed {
+                onFieldCaptureEvent?(.refused(id: id,reason: anchorFailureReason ?? "anchor_hit_unavailable",ai: nil))
+                measurementId = nil
+            }
+        }
         guard let anchor = screenCenterHit else { return }
         guard let cam = currentCameraTranslation() else {
             anchorFailureReason = Self.cameraNotReadyText
@@ -965,6 +998,7 @@ public final class HeightScanViewModel: ObservableObject {
         recordAnchorHitType = hitType
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
+        placed = true
     }
 
     /// Lets the host clear `anchorFailureReason` from a banner-dismiss
@@ -988,6 +1022,13 @@ public final class HeightScanViewModel: ObservableObject {
     /// 10–100× and produced absurd heights (e.g. a desk at 2 m showing
     /// up as 100 m+) instead of an honest "tracking not ready" message.
     public func captureTopNow(screenCenterHit: SIMD3<Float>? = nil) {
+        guard mayContinueFieldCapture() else { return }
+        let previousGeneration = resultGeneration
+        defer {
+            if previousGeneration == resultGeneration, let measurementId {
+                onFieldCaptureEvent?(.stageRefused(id: measurementId,stage: "top",reason: anchorFailureReason ?? "top_sighting_unavailable"))
+            }
+        }
         // No trunk anchor left = no d_h, and d_h is the whole scale of H.
         // Refusing here is the only honest branch; the stale anchor point
         // would still produce a confident-looking number.
@@ -1049,6 +1090,12 @@ public final class HeightScanViewModel: ObservableObject {
     /// standing pose used for both angles. Same clock convention as
     /// `captureTopNow()`.
     public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
+        guard mayContinueFieldCapture() else { return }
+        defer {
+            if state == .aimBaseArmed, let measurementId {
+                onFieldCaptureEvent?(.stageRefused(id: measurementId,stage: "base",reason: anchorFailureReason ?? "base_sighting_unavailable"))
+            }
+        }
         // Same two refusals as the top aim — see `captureTopNow`.
         guard !anchorLost else {
             anchorFailureReason = Self.anchorLostText
@@ -1076,6 +1123,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// Test/preview hook: push α_base directly (FIRST), skipping the sample buffer.
     public func captureBaseDirect(alphaBaseRad: Float,
                                   standingPointWorld: SIMD3<Float>) {
+        guard mayContinueFieldCapture() else { return }
         guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
         self.alphaBaseRad = alphaBaseRad
         // Same re-basing as the real base tap — a test hook that stored an
@@ -1089,6 +1137,7 @@ public final class HeightScanViewModel: ObservableObject {
 
     /// Test/preview hook: push α_top directly (SECOND), skipping the IMU.
     public func captureTopDirect(alphaTopRad: Float) {
+        guard mayContinueFieldCapture() else { return }
         guard state == .aimTopArmed, anchorPointWorld != nil,
               alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
@@ -1100,6 +1149,8 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     public func retake() {
+        if let measurementId { onFieldCaptureEvent?(.abandoned(id: measurementId,reason: "retake")) }
+        measurementId = nil
         anchorPointWorld = nil
         // Release the ARKit trunk anchor with the rest of the geometry — a
         // new measurement must pin its own trunk, never inherit the last one.
@@ -1128,8 +1179,8 @@ public final class HeightScanViewModel: ObservableObject {
         anchorFailureReason = nil
         recordPoseSamples.removeAll(keepingCapacity: true)
         lastPoseSampleTime = 0
-        recordBaseFrame = nil; recordBaseJPEG = nil
-        recordTopFrame = nil; recordTopJPEG = nil
+        recordBaseFrame = nil; recordBaseJPEG = nil; recordBaseImageMetadata = nil
+        recordTopFrame = nil; recordTopJPEG = nil; recordTopImageMetadata = nil
         lastCaptureOutcome = nil
         // The previous bundle is no longer "the capture on screen" — a truth
         // typed after a retake must not land on the abandoned measurement.
@@ -1152,6 +1203,11 @@ public final class HeightScanViewModel: ObservableObject {
     public func accept() {
         guard let r = result, HeightEstimator.canAccept(r) else { return }
         state = .accepted
+    }
+
+    /// Raw adoption is confirmed only after the application's durable save.
+    public func confirmResultStored(id: String) {
+        guard measurementId == id, lastRecordedBundleID == id else { return }
         markLastBundleAccepted()
     }
 
@@ -1201,6 +1257,9 @@ public final class HeightScanViewModel: ObservableObject {
         // Imperial input is still converted to metres BEFORE the comparison,
         // so the floor means the same physical height in either unit system.
         guard metres >= Double(HeightEstimator.minHMeters) else { return }
+        guard let id = beginFieldCapture(typed: true) else { return }
+        var ai = FieldAIProvenance(); ai.reason = "typed_measurement"
+        onFieldCaptureEvent?(.result(id: id,value: Double(Float(metres)),sigma: nil,valid: true,reason: nil,ai: ai))
         let m = Float(metres)
         result = HeightResult(
             heightM: m,
@@ -1221,6 +1280,7 @@ public final class HeightScanViewModel: ObservableObject {
     // MARK: - Estimation
 
     private func compute() {
+        guard mayContinueFieldCapture() else { return }
         guard let anchor = anchorPointWorld,
               let at = alphaTopRad,
               let ab = alphaBaseRad,
@@ -1256,6 +1316,10 @@ public final class HeightScanViewModel: ObservableObject {
         // The Diameter twin does exactly this at the end of
         // `finalizeCapture()`.
         resultGeneration &+= 1
+        if let measurementId {
+            onFieldCaptureEvent?(.result(id: measurementId,value: Double(r.heightM),sigma: r.sigmaHm.map(Double.init),
+                valid: canAcceptResult,reason: r.rejectionReason,ai: FieldAIProvenance()))
+        }
         recordRawHeightIfNeeded(result: r, anchor: anchor, standing: standing,
                                 alphaTop: at, alphaBase: ab)
     }
@@ -1290,10 +1354,22 @@ public final class HeightScanViewModel: ObservableObject {
         let baseJPEG = recordBaseJPEG
         let topFrame = recordTopFrame
         let topJPEG = recordTopJPEG
-        let id = UUID().uuidString
+        let baseImageMetadata = recordBaseImageMetadata; let topImageMetadata = recordTopImageMetadata
+        guard let id = measurementId else { lastCaptureOutcome = .failed(reason: "measurement identity unavailable"); return }
         lastRecordedBundleID = id
         lastCaptureOutcome = nil
-        Task.detached(priority: .utility) { [weak self] in
+        let captured = RawCaptureEvidence(measurementId: id,resultSeconds: ProcessInfo.processInfo.systemUptime,
+            displayedResult: .init(value: Double(r.heightM),sigma: r.sigmaHm.map(Double.init),tier: r.confidence.rawValue,
+                method: r.method.rawValue,valid: HeightEstimator.canAccept(r)))
+        let fieldEvent = onFieldCaptureEvent
+        let publish: @MainActor @Sendable (RawCaptureOutcome,Double?,String?) -> Void = { [weak self] outcome,replayed,status in
+            if self?.measurementId == id { self?.lastCaptureOutcome = outcome }
+            switch outcome {
+            case .saved: fieldEvent?(.raw(id: id,status: .saved,reason: status.flatMap { $0 == "pass" ? nil : "original_input_replay_"+$0 },replayValue: replayed))
+            case .failed(let reason): fieldEvent?(.raw(id: id,status: .failed,reason: reason,replayValue: nil))
+            }
+        }
+        PendingWorkRegistry.rawCapture.submit {
             let outcome = RawCaptureRecorder.recordHeight(
                 id: id,
                 anchorWorld: anchor, anchorHitType: hitType,
@@ -1305,8 +1381,10 @@ public final class HeightScanViewModel: ObservableObject {
                 trackingDropped: dropped,
                 calibration: cal, context: ctx, gps: gps,
                 baseFrame: baseFrame, baseJPEG: baseJPEG,
-                topFrame: topFrame, topJPEG: topJPEG)
-            await MainActor.run { self?.lastCaptureOutcome = outcome }
+                topFrame: topFrame, topJPEG: topJPEG,baseImageMetadata: baseImageMetadata,
+                topImageMetadata: topImageMetadata,captureEvidence: captured)
+            let proof = RawCaptureStore.loadManifest(id: id)?.captureEvidence
+            await publish(outcome,proof?.replayValue,proof?.replayStatus)
         }
     }
 
@@ -1314,7 +1392,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// Safe before the writer has finished — the store parks it.
     private func markLastBundleAccepted() {
         guard rawCaptureEnabled, let id = lastRecordedBundleID else { return }
-        Task.detached(priority: .utility) {
+        PendingWorkRegistry.rawCapture.submit {
             _ = RawCaptureStore.markAccepted(id: id)
         }
     }

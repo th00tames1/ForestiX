@@ -90,6 +90,8 @@ public struct BasemapMarker: Identifiable, Equatable {
     public enum Shape: Equatable, Sendable {
         /// Bottom-anchored teardrop pin (tree).
         case teardrop
+        /// Surveyed target: compact numbered point, not an observed tree pin.
+        case target
         /// Centre-anchored hollow ring (cruise plot).
         case ring(dashed: Bool)
     }
@@ -1685,7 +1687,7 @@ public struct BasemapMapView: View {
         switch marker.shape {
         case .teardrop:
             return (hasBadge ? 48 : 30) / 2
-        case .ring:
+        case .ring, .target:
             return hasBadge ? -8 : 0
         }
     }
@@ -1709,6 +1711,12 @@ public struct BasemapMapView: View {
             VStack(spacing: 3) {
                 switch marker.shape {
                 case .teardrop: teardropHead(marker)
+                case .target:
+                    Text(marker.title).font(.system(size: 10,weight: .semibold,design: .monospaced))
+                        .lineLimit(1).minimumScaleFactor(0.5).foregroundStyle(style.pinInk)
+                        .frame(width: 26,height: 26).background(marker.tint,in: Circle())
+                        .overlay(Circle().stroke(style.pinStroke,lineWidth: 2))
+                        .shadow(color: .black.opacity(0.25),radius: 2)
                 case .ring(let dashed): ringHead(marker, dashed: dashed)
                 }
 
@@ -1721,7 +1729,7 @@ public struct BasemapMapView: View {
                                 badgeChip(String(letter))
                             }
                         }
-                    case .ring:
+                    case .ring, .target:
                         // Whole-string chip (e.g. a tally count).
                         badgeChip(badge)
                     }

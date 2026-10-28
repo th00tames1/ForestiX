@@ -17,7 +17,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.hcjeong.forestix.ui.screens.CalibrationScreen
 import com.hcjeong.forestix.ui.screens.DistanceMeasureScreen
 import com.hcjeong.forestix.ui.screens.ExportScreen
 import com.hcjeong.forestix.ui.screens.FieldLogScope
@@ -63,9 +62,6 @@ object Routes {
     const val DISTANCE = "distance"
     const val SAMPLING = "sampling"
     const val SETTINGS = "settings"
-    /// Project-less calibration entry from Settings — iOS Settings
-    /// calibrationSection NavigationLink { CalibrationScreen() }.
-    const val CALIBRATION = "calibration"
     const val REFERENCE_LIBRARY = "referenceLibrary"
     /// Developer-only raw-capture replay console (Settings › Developer).
     const val RAW_CAPTURES = "rawCaptures"
@@ -118,7 +114,6 @@ fun ForestixRoot() {
         composable(Routes.DISTANCE) { DistanceMeasureScreen(nav) }
         composable(Routes.SAMPLING) { SamplingPlotScreen(nav) }
         composable(Routes.SETTINGS) { SettingsScreen(nav) }
-        composable(Routes.CALIBRATION) { CalibrationScreen(nav) }
         composable(Routes.REFERENCE_LIBRARY) { ReferenceLibraryScreen(nav) }
         composable(Routes.RAW_CAPTURES) { RawCapturesScreen(nav) }
 
@@ -158,8 +153,6 @@ fun ForestixRoot() {
         composable(ProjectFlowRoutes.EXPORT) { back ->
             ExportScreen(nav, back.arg("projectId"))
         }
-        composable(ProjectFlowRoutes.CALIBRATION) { back ->
-            CalibrationScreen(nav, back.arg("projectId"))
-        }
     }
+    RecoverEmptyNavigation(nav)
 }

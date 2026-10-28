@@ -110,6 +110,7 @@ public final class BackupViewModel: ObservableObject {
                 from: url,
                 into: stack,
                 attachmentsDirectory: dir)
+            env.speciesCatalog.refresh()
             ForestixLogger.log(.backupRestored(
                 projectId: result.importedProjectId,
                 fromPath: url.path))

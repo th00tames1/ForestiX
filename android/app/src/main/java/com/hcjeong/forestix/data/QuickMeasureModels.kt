@@ -196,7 +196,15 @@ data class QuickMeasureEntry(
     /// claim's uncertainty. It is exported as its own column so that separation
     /// survives leaving the phone.
     val timeSource: String? = null,
+    /** Explicit attempt identity; malformed/present IDs remain protected
+     * rather than silently degrading to legacy time/value matching. */
+    val measurementId: String? = null,
 ) {
+    val allowsLegacyInference:Boolean get()=measurementId==null
+    fun identifyingMeasurement():QuickMeasureEntry {
+        require(measurementId==null||runCatching{UUID.fromString(measurementId)==id&&id.toString().equals(measurementId,true)}.getOrDefault(false)){"Reading measurement identity"}
+        return copy(measurementId=id.toString())
+    }
     /// How this reading's tree is labelled anywhere a tree is named — the
     /// cruiser's name when there is one, else the bare "#12" the log and the
     /// map pins have always shown. Null only for a reading that belongs to no
@@ -408,7 +416,8 @@ data class QuickMeasureEntry(
             plotID: java.util.UUID?,
             speciesCode: String? = null,
             truth: Double? = null,
-        ) = QuickMeasureEntry(
+        ):QuickMeasureEntry { val id=UUID.randomUUID();return QuickMeasureEntry(
+            id = id,
             kind = kind,
             value = value,
             sigma = null,
@@ -421,7 +430,8 @@ data class QuickMeasureEntry(
             position = if (kind == MeasureKind.DBH) StemPosition.DBH else null,
             captureMode = "typed",
             truth = truth,
-        )
+            measurementId = id.toString(),
+        ) }
     }
 }
 

@@ -81,7 +81,8 @@ enum class Country(val raw: String) {
     UNITED_STATES("us"),
     FINLAND("fi"),
     GERMANY("de"),
-    SOUTH_KOREA("kr");
+    SOUTH_KOREA("kr"),
+    INTERNATIONAL("international");
 
     val id: String get() = raw
 
@@ -91,6 +92,7 @@ enum class Country(val raw: String) {
             FINLAND -> "Finland"
             GERMANY -> "Germany"
             SOUTH_KOREA -> "South Korea"
+            INTERNATIONAL -> "International"
         }
 
     val subtitle: String
@@ -99,6 +101,7 @@ enum class Country(val raw: String) {
             FINLAND -> "Nordic · Laasasenaho stem volume (m³)"
             GERMANY -> "Central Europe · form-factor volume (m³)"
             SOUTH_KOREA -> "NIFoS metric (m³) · coefficients pending"
+            INTERNATIONAL -> "All species · no default volume equation"
         }
 
     /// Board-foot log rules are a North-America-only concept. Only the US
@@ -129,7 +132,7 @@ enum class Country(val raw: String) {
     /// True when the country is selectable but its volume coefficients are
     /// not yet bundled — stand volume must render "—", never a fabricated
     /// figure (Korea, pending official NIFoS coefficients).
-    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA || this == UNITED_STATES
+    val volumeStandardPending: Boolean get() = this == SOUTH_KOREA || this == UNITED_STATES || this == INTERNATIONAL
 
     /// Read-only "Volume standard" row shown in Settings, derived from the
     /// country (and, for the US, the selected region's log rule elsewhere).
@@ -139,6 +142,7 @@ enum class Country(val raw: String) {
             FINLAND -> "Laasasenaho (1982) · m³"
             GERMANY -> "Form factor  V = g·h·f · m³ (approx.)"
             SOUTH_KOREA -> "NIFoS national table — coefficients pending"
+            INTERNATIONAL -> "No default volume equation"
         }
 
     companion object {
@@ -169,7 +173,7 @@ val Region.defaultLogRule: LogRule
 object CountrySpecies {
 
     fun defaultSpecies(country: Country): List<Pair<String, String>> = when (country) {
-        Country.UNITED_STATES -> emptyList()   // scoped by Region
+        Country.UNITED_STATES, Country.INTERNATIONAL -> emptyList() // Shared catalogue supplies these.
 
         Country.FINLAND -> listOf(
             "FI-PISY" to "Scots pine",

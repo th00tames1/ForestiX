@@ -43,6 +43,48 @@ public final class DBHScanViewModel: ObservableObject {
     /// Bumped once per completed burst (incl. rejected) so the screen can
     /// fire research logging exactly when a new measurement is committed.
     @Published public private(set) var resultGeneration: Int = 0
+    @Published public private(set) var measurementId: String?
+    @Published public private(set) var rawAIRecordingWarning: String?
+    public var onFieldCaptureEvent: (@MainActor @Sendable (FieldCaptureEvent) -> Void)?
+    public var fieldCapturePermission: (@MainActor @Sendable (_ typed: Bool,_ continuing: Bool) -> String?)?
+    private var burstFieldAI = FieldAIProvenance()
+    private var liveMaskInferenceId: String?
+    private var lastSuccessfulInferenceId: String?
+    private var userAdjustedBoundary = false
+    private var lastInferenceHadMask = false
+    private var boundaryInferenceId: String?
+    private var latestAIRecordSource: (any RawAIRecordSource)?
+    private var liveAIRecordSource: (any RawAIRecordSource)?
+    private var boundaryAIRecordSource: (any RawAIRecordSource)?
+    private var burstAIRecordSource: (any RawAIRecordSource)?
+    /// The final Auto photo is this captured input, never a later live screen.
+    public private(set) var snapshotReference: RawCameraJPEG?
+    public private(set) var snapshotMask: LiveStemMask?
+    public private(set) var snapshotGuide: StemExtent?
+    public private(set) var snapshotViewSize: CGSize = .zero
+    private var snapshotInferencePending = false
+    private var snapshotCaptureTask: Task<Void, Never>?
+    private var snapshotContext: RawCaptureContext?
+    private let snapshotCaptureService: DBHSnapshotCaptureService
+    public func noteUserBoundaryAdjustment() {
+        userAdjustedBoundary = true; boundaryInferenceId = nil; boundaryAIRecordSource = nil
+    }
+    private func fieldAI(applied: Bool = false) -> FieldAIProvenance {
+        AIBoundaryProvenance.snapshot(enabled: segmentationEnabled,usingBracket: applied,lastInferenceId: lastSuccessfulInferenceId,
+            lastHadMask: lastInferenceHadMask,boundaryInferenceId: boundaryInferenceId,userEdited: userAdjustedBoundary)
+    }
+    private func aiSource(for ai: FieldAIProvenance) -> (any RawAIRecordSource)? {
+        let candidates = [burstAIRecordSource,boundaryAIRecordSource,liveAIRecordSource,latestAIRecordSource]
+        return candidates.compactMap { $0 }.first { $0.inferenceId == ai.inferenceId }
+    }
+    @discardableResult private func beginFieldCapture(typed: Bool = false) -> String? {
+        if let reason = fieldCapturePermission?(typed,false) { captureRefusalReason = reason; return nil }
+        let id = UUID().uuidString; measurementId = id
+        burstAIRecordSource = nil
+        rawAIRecordingWarning = nil
+        onFieldCaptureEvent?(.started(id: id,rawRequested: rawCaptureEnabled,aiEnabled: segmentationEnabled,typed: typed))
+        return id
+    }
     @Published public private(set) var crosshairIsStable: Bool = false
     /// Disabled only by the canned preview factory; live iPad measurements
     /// require the actual scene lock and a frame from the current viewport.
@@ -166,21 +208,9 @@ public final class DBHScanViewModel: ObservableObject {
 
     /// Depth window the Auto crosshair may arm in.
     ///
-    /// IT IS THE ESTIMATOR'S WINDOW, not a second opinion about it. The gate
-    /// was written in Phase 2 against the partial-arc pipeline, whose own
-    /// tap-depth window was 0.5–3.0 m, and the two matched exactly. Phase 19
-    /// widened the chord estimator to 0.3–5.0 m (`chordPreviewFit` /
-    /// `chordEstimate`, both of which run this capture) and nobody moved the
-    /// gate, so between 3 and 5 m the cruiser got a live diameter in the
-    /// badge, a red crosshair, and a "+" that did nothing — a refusal of
-    /// readings the estimator behind it would have made correctly.
-    ///
-    /// Widening the gate does not widen what the estimator will accept: a
-    /// stem at 5 m subtends few enough pixels that the silhouette walk drops
-    /// the rows (`w < 5`) and the fit fails on its own, and the plausibility
-    /// ceiling is unchanged. This only stops the app refusing before the
-    /// estimator has been asked.
-    public static let armDepthRangeM: ClosedRange<Float> = 0.3...5.0
+    /// Read the estimator's admission window instead of maintaining a
+    /// second range that can disagree with preview and capture.
+    public static let armDepthRangeM = DBHEstimator.usableTapDepthM
 
     /// Why the last "+" did nothing. A capture button that refuses in silence
     /// is indistinguishable from a broken one — the same defect that was
@@ -192,10 +222,7 @@ public final class DBHScanViewModel: ObservableObject {
     /// Tap refusals. Byte identical to the Android `DBHScanScreen.kt`
     /// constants of the same names.
     ///
-    /// None of them names the metres of the window: iOS arms over its
-    /// estimator's 0.3–5.0 m and Android over its own 0.4–3.5 m, so a
-    /// sentence quoting a number could not be the same sentence on both. The
-    /// direction to walk is what the cruiser can act on anyway.
+    /// These do not hard-code a range. The direction to walk is the action.
     public static let tooFarText =
         "Too far from the trunk to read depth — step closer, then tap + again."
     public static let tooCloseText =
@@ -214,7 +241,13 @@ public final class DBHScanViewModel: ObservableObject {
         // The held ADJUST value goes with the latch: it was measured through
         // the bracket, and there is no bracket outside this mode.
         didSet {
-            if edgeAdjustActive && segmentationEnabled { stopSegmentationFeed() }
+            if edgeAdjustActive && segmentationEnabled {
+                if let guide = liveStemGuideExtent {
+                    edgeBracketLeftFraction = guide.leftFraction
+                    edgeBracketRightFraction = guide.rightFraction
+                }
+                stopSegmentationFeed()
+            }
             if !edgeAdjustActive {
                 resetBracketSettling()
             }
@@ -253,10 +286,10 @@ public final class DBHScanViewModel: ObservableObject {
     @Published public private(set) var autoAlignmentBusy = false
     @Published public private(set) var autoAlignmentMessage: String?
     @Published public private(set) var liveStemMask: LiveStemMask?
+    @Published public private(set) var liveStemGuideExtent: StemExtent?
     public var autoAlignmentPaused = false {
         didSet { if autoAlignmentPaused { clearLiveAutoLock() } }
     }
-    @Published public private(set) var segmentedExtent: StemExtent?
     @Published public private(set) var segmenterAvailability: SegmenterAvailability = .noModel
     /// Auto is explicit and user-facing; developer settings do not gate it.
     @Published public var segmentationEnabled = false {
@@ -266,8 +299,11 @@ public final class DBHScanViewModel: ObservableObject {
             else { pauseSegmentationFeed(); clearLiveAutoLock() }
         }
     }
-    private var liveAutoTracker = LiveStemTracker()
-    private var liveAutoFrame: ARDepthFrame?
+    private var liveMaskPreview = LiveStemMaskPreview()
+    private var liveMaskFrame: ARDepthFrame?
+    #if DEBUG
+    private var liveAutoLastDiagnostic = -Double.infinity
+    #endif
     private var liveAutoGeneration: UInt64 = 0
     #if canImport(OnnxRuntimeBindings)
     private var segmentationTask: Task<Void, Never>?
@@ -276,6 +312,10 @@ public final class DBHScanViewModel: ObservableObject {
     public func requestAutoAlignment() {
         guard state == .idle || state == .aligning || state == .armed || state == .rejected else { return }
         edgeAdjustActive = false
+        userAdjustedBoundary = false
+        lastSuccessfulInferenceId = nil
+        lastInferenceHadMask = false; boundaryInferenceId = nil
+        latestAIRecordSource = nil; boundaryAIRecordSource = nil
         clearLiveAutoLock()
         autoAlignmentMessage = "Finding stem…"
         segmentationEnabled = true
@@ -283,42 +323,93 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     private func clearLiveAutoLock() {
-        liveAutoTracker.reset(); liveAutoFrame = nil
-        liveStemMask = nil; segmentedExtent = nil
+        liveMaskPreview.reset(); liveMaskFrame = nil; liveStemMask = nil
+        liveMaskInferenceId = nil
+        liveAIRecordSource = nil
+        liveStemGuideExtent = nil
     }
 
-    private var liveAutoHasLock: Bool {
-        liveAutoTracker.isFresh(at: ProcessInfo.processInfo.systemUptime)
+    private func expireLiveMask(at time: Double) {
+        if liveMaskPreview.expire(at: time) == nil {
+            if liveStemMask != nil { liveStemMask = nil }
+            liveMaskFrame = nil
+            liveMaskInferenceId = nil
+            liveAIRecordSource = nil
+        }
+        if liveStemGuideExtent != liveMaskPreview.guideExtent {
+            liveStemGuideExtent = liveMaskPreview.guideExtent
+        }
+        // No depth callbacks may arrive during an outage. Expiry must still
+        // retire the Auto readout instead of leaving a stale number on screen.
+        if segmentationDroveTheBracket, liveMaskPreview.bracketForDepth(at: time) == nil,
+           state == .idle || state == .aligning || state == .armed {
+            if previewFit != nil { previewFit = nil }
+            if previewDbhCm != nil { previewDbhCm = nil }
+            if previewTier != nil { previewTier = nil }
+            if distanceToStemCenterM != nil { distanceToStemCenterM = nil }
+            if guideRowWorldY != nil { guideRowWorldY = nil }
+            if crosshairIsStable { crosshairIsStable = false }
+            if isStable { isStable = false }
+            resetBracketSettling()
+            if state == .armed { state = .aligning }
+        }
+    }
+
+    private func validateLiveMask(for frame: ARDepthFrame, at time: Double) {
+        if let source = liveMaskFrame {
+            let decision = LiveStemResultPolicy.evaluate(age: time - source.timestamp,
+                travelMeters: Double(simd_distance(source.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3)),
+                facingDot: Double(simd_dot(source.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2)),
+                mappingCompatible: source.viewMapping == frame.viewMapping &&
+                    source.viewportRevision == frame.viewportRevision &&
+                    source.width == frame.width && source.height == frame.height,
+                upDot: Double(simd_dot(source.cameraPoseWorld.columns.1, frame.cameraPoseWorld.columns.1)))
+            if !decision.displayMask { liveMaskPreview.reset(); liveMaskFrame = nil }
+        }
+        expireLiveMask(at: time)
+    }
+
+    private var liveAutoHasBracket: Bool {
+        liveMaskPreview.bracketForDepth(at: ProcessInfo.processInfo.systemUptime) != nil
     }
 
     #if canImport(OnnxRuntimeBindings)
     private struct SegmentationTick {
+        let id = UUID().uuidString
         let buffer: CVPixelBuffer
         let frame: ARDepthFrame
         let viewSize: CGSize
         let generation: UInt64
         let started: Double
+        let recordAI: Bool
+        let imageMetadata: RawCapturedImage?
     }
 
-    /// A single worker, capped at ~8 Hz. No AR camera buffer is retained.
+    /// One worker, up to 16 Hz (8 Hz under thermal pressure). No AR buffer retained.
     private func startSegmentationFeed() {
         guard segmentationEnabled, segmentationTask == nil else { return }
         let generation = liveAutoGeneration
         segmentationTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let tick = self?.prepareSegmentationTick(generation: generation) else {
-                    try? await Task.sleep(nanoseconds: 125_000_000)
+                    try? await Task.sleep(nanoseconds: UInt64(LiveAutoCadence.idleSeconds*1_000_000_000))
                     continue
                 }
                 self?.autoAlignmentBusy = true
                 let outcome = await Task.detached(priority: .userInitiated) {
-                    Result { try YoloBoundaryAligner.shared().track(
-                        buffer: tick.buffer, frame: tick.frame, viewSize: tick.viewSize) }
+                    Result {
+                        try YoloBoundaryAligner.withShared { model in
+                            if tick.recordAI { return try model.trackWithCapture(buffer: tick.buffer,frame: tick.frame,
+                                viewSize: tick.viewSize,id: tick.id,sourceImage: tick.imageMetadata,started: tick.started) }
+                            return YoloTrackedCapture(observation: try model.track(buffer: tick.buffer,frame: tick.frame,viewSize: tick.viewSize))
+                        }
+                    }
                 }.value
                 guard !Task.isCancelled else { return }
                 self?.applyLiveAuto(outcome, tick: tick)
                 let elapsed = ProcessInfo.processInfo.systemUptime - tick.started
-                let delay = max(0.02, 0.125 - elapsed)
+                let delay = LiveAutoCadence.delaySeconds(elapsed: elapsed,
+                    thermallyLimited: ProcessInfo.processInfo.thermalState != .nominal)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -331,44 +422,78 @@ public final class DBHScanViewModel: ObservableObject {
             clearLiveAutoLock(); autoAlignmentMessage = refusal; return nil
         }
         let now = ProcessInfo.processInfo.systemUptime
-        guard let live = session.currentCameraPixelBuffer(), let buffer = Self.copyPixelBuffer(live),
-              let frame = session.latestDepthFrame, frame.viewMapping != nil,
+        // Check the cheap refusal conditions before allocating/copying RGB.
+        // Keep the deep snapshot itself: the worker must not retain ARKit's
+        // original camera buffer or let another inference overwrite its input.
+        guard let frame = session.latestDepthFrame, frame.viewMapping != nil,
               now >= frame.timestamp, now - frame.timestamp <= 0.25,
               viewSize.width > 1, viewSize.height > 1 else {
-            segmentedExtent = liveAutoTracker.update(nil, at: now)
-            if !liveAutoHasLock { liveStemMask = nil }
+            liveMaskPreview.update(nil, at: now)
+            expireLiveMask(at: now)
             return nil
         }
+        let recordAI = rawCaptureEnabled && rawCapturePreserveAIInputs
+        let input = recordAI ? session.currentCameraInputSnapshot() : nil
+        guard let live = input?.buffer ?? session.currentCameraPixelBuffer(),let buffer = Self.copyPixelBuffer(live) else { return nil }
         return SegmentationTick(buffer: buffer, frame: frame, viewSize: viewSize,
-                                generation: generation, started: now)
+                                generation: generation, started: now,recordAI: recordAI,imageMetadata: input?.metadata)
     }
 
-    private func applyLiveAuto(_ outcome: Result<LiveStemObservation?, Error>, tick: SegmentationTick) {
+    private func applyLiveAuto(_ outcome: Result<YoloTrackedCapture, Error>, tick: SegmentationTick) {
         if tick.generation == liveAutoGeneration { autoAlignmentBusy = false }
         guard tick.generation == liveAutoGeneration, segmentationEnabled, !edgeAdjustActive, !autoAlignmentPaused,
               state == .idle || state == .aligning || state == .armed else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - tick.started <= 0.45, orientationRefusal(for: tick.frame) == nil,
+        guard orientationRefusal(for: tick.frame) == nil,
               let current = session.latestDepthFrame, viewSize == tick.viewSize,
               current.viewMapping == tick.frame.viewMapping,
-              simd_distance(current.cameraPoseWorld.columns.3, tick.frame.cameraPoseWorld.columns.3) < 0.02,
-              simd_dot(current.cameraPoseWorld.columns.2, tick.frame.cameraPoseWorld.columns.2) > 0.9994 else {
+              current.viewportRevision == tick.frame.viewportRevision else {
             clearLiveAutoLock(); autoAlignmentMessage = "Finding stem…"; return
         }
+        let decision = LiveStemResultPolicy.evaluate(age: now - tick.started,
+            travelMeters: Double(simd_distance(current.cameraPoseWorld.columns.3, tick.frame.cameraPoseWorld.columns.3)),
+            facingDot: Double(simd_dot(current.cameraPoseWorld.columns.2, tick.frame.cameraPoseWorld.columns.2)),
+            upDot: Double(simd_dot(current.cameraPoseWorld.columns.1, tick.frame.cameraPoseWorld.columns.1)))
+        validateLiveMask(for: current, at: now)
         switch outcome {
-        case .success(let observation):
+        case .success(let tracked):
+            let observation = tracked.observation
+            lastSuccessfulInferenceId = tick.id
+            lastInferenceHadMask = observation?.mask != nil
+            latestAIRecordSource = rawCaptureEnabled && rawCapturePreserveAIInputs ? tracked.source : nil
             segmenterAvailability = .ready
-            segmentedExtent = liveAutoTracker.update(observation?.extent, at: tick.started)
-            if liveAutoTracker.lastGood == tick.started, let mask = observation?.mask { liveStemMask = mask }
-            else if !liveAutoHasLock { liveStemMask = nil }
-            if let extent = segmentedExtent {
-                edgeBracketLeftFraction = extent.leftFraction
-                edgeBracketRightFraction = extent.rightFraction
-                if liveAutoTracker.lastGood == tick.started { liveAutoFrame = tick.frame }
+            #if DEBUG
+            if now - liveAutoLastDiagnostic >= 1 {
+                liveAutoLastDiagnostic = now
+                print("ForestiX Auto: \(Int((now - tick.started) * 1000))ms mask=\(observation?.mask != nil) guide=\(observation?.guideExtent != nil) display=\(decision.displayMask)")
             }
-            autoAlignmentMessage = liveAutoHasLock ? nil : "Finding stem…"
+            #endif
+            if decision.displayMask {
+                liveMaskPreview.update(observation, at: tick.started, receivedAt: now)
+                if observation?.mask != nil,
+                   liveMaskPreview.guideSourceTime == tick.started || liveMaskFrame == nil {
+                    liveMaskFrame = tick.frame; liveMaskInferenceId = tick.id; liveAIRecordSource = latestAIRecordSource
+                }
+            }
+            liveStemMask = liveMaskPreview.expire(at: now)
+            if liveStemGuideExtent != liveMaskPreview.guideExtent {
+                liveStemGuideExtent = liveMaskPreview.guideExtent
+            }
+            if liveStemMask == nil { liveMaskFrame = nil; liveMaskInferenceId = nil; liveAIRecordSource = nil }
+            if let candidate = liveMaskPreview.bracketForDepth(at: now) {
+                edgeBracketLeftFraction = candidate.leftFraction
+                edgeBracketRightFraction = candidate.rightFraction
+                if liveMaskPreview.guideSourceTime == tick.started {
+                    boundaryInferenceId = tick.id; boundaryAIRecordSource = latestAIRecordSource
+                }
+            }
+            autoAlignmentMessage = liveMaskPreview.guidance(
+                measurementReady: liveAutoHasBracket && previewFit != nil && previewTier != .red)
         case .failure(let error):
-            clearLiveAutoLock()
+            // A transient inference failure does not erase a still-registered
+            // bracket. Neither clock is refreshed by this miss.
+            liveMaskPreview.update(nil, at: now)
+            expireLiveMask(at: now)
             autoAlignmentMessage = error.localizedDescription
         }
     }
@@ -524,7 +649,12 @@ public final class DBHScanViewModel: ObservableObject {
     /// When true (screen sets it from `developerMode && rawCaptureEnabled`),
     /// every completed depth burst — accepted, rejected, or ADJUST-bracket —
     /// serializes a raw-capture bundle. Off ⇒ zero recording cost.
-    public var rawCaptureEnabled: Bool = false
+    public var rawCaptureEnabled: Bool = false {
+        didSet { if !rawCaptureEnabled { latestAIRecordSource = nil; liveAIRecordSource = nil; boundaryAIRecordSource = nil } }
+    }
+    public var rawCapturePreserveAIInputs: Bool = false {
+        didSet { if !rawCapturePreserveAIInputs { latestAIRecordSource = nil; liveAIRecordSource = nil; boundaryAIRecordSource = nil } }
+    }
     /// Context tags (mode / project / plot / tree / units) written into the
     /// manifest. Set by the scan screen on appear.
     public var rawCaptureContext: RawCaptureContext = .quick
@@ -546,6 +676,7 @@ public final class DBHScanViewModel: ObservableObject {
     private var recordFrames: [ARDepthFrame] = []
     /// Reference camera JPEG grabbed at burst start (developer mode only).
     private var recordReferenceJPEG: Data?
+    private var recordReferenceImageMetadata: RawCapturedImage?
 
     // MARK: - Burst state
 
@@ -630,12 +761,15 @@ public final class DBHScanViewModel: ObservableObject {
         calibration: ProjectCalibration,
         session: ARKitSessionManager? = nil,
         rawPointsWriter: (@Sendable ([SIMD2<Double>]) -> String?)? = nil,
-        method: DBHMeasurementMethod = .chord
+        method: DBHMeasurementMethod = .chord,
+        snapshotCaptureService: DBHSnapshotCaptureService? = nil
     ) {
         // Default to the APP-SHARED session (field round 8): one ARKit
         // world frame across all measure screens, so the sampling-plot
         // anchor placed elsewhere renders here too.
-        self.session = session ?? .shared
+        let actualSession = session ?? .shared
+        self.session = actualSession
+        self.snapshotCaptureService = snapshotCaptureService ?? .live(session: actualSession)
         self.calibration = calibration
         self.rawPointsWriter = rawPointsWriter
         self.dbhMeasurementMethod = method
@@ -678,6 +812,7 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     public func onDisappear() {
+        snapshotCaptureTask?.cancel(); snapshotCaptureTask = nil
         pauseSegmentationFeed()
         clearLiveAutoLock()
         depthCancellable?.cancel()
@@ -690,11 +825,12 @@ public final class DBHScanViewModel: ObservableObject {
         // generation invalidates the pending watchdog Tasks; we roll state
         // back to the aiming stage WITHOUT touching `result`.
         if state == .capturing {
+            snapshotInferencePending = false
             captureGeneration &+= 1
             burstBuffer.removeAll(keepingCapacity: true)
             subSamples.removeAll(keepingCapacity: true)
             recordFrames.removeAll(keepingCapacity: true)
-            recordReferenceJPEG = nil
+            recordReferenceJPEG = nil; recordReferenceImageMetadata = nil
             captureSampleIndex = 0
             state = .aligning
         }
@@ -722,6 +858,7 @@ public final class DBHScanViewModel: ObservableObject {
             return
         }
         if state == .capturing {
+            guard !snapshotInferencePending else { return }
             // Never count the same frame twice or mix viewport geometries.
             guard captureSampleTotal > 1, let first = burstBuffer.first,
                   let last = burstBuffer.last,
@@ -740,20 +877,18 @@ public final class DBHScanViewModel: ObservableObject {
         // cruiser was actually looking at.
         latestFrameForBracket = frame
         if segmentationEnabled, !edgeAdjustActive, state != .capturing {
-            if let source = liveAutoFrame,
-               (source.viewMapping != frame.viewMapping ||
-                simd_distance(source.cameraPoseWorld.columns.3, frame.cameraPoseWorld.columns.3) >= 0.02 ||
-                simd_dot(source.cameraPoseWorld.columns.2, frame.cameraPoseWorld.columns.2) <= 0.9994) {
-                clearLiveAutoLock()
-            }
-            if !liveAutoHasLock {
+            let now = ProcessInfo.processInfo.systemUptime
+            validateLiveMask(for: frame, at: now)
+            if let bracket = liveMaskPreview.bracketForDepth(at: now) {
+                edgeBracketLeftFraction = bracket.leftFraction
+                edgeBracketRightFraction = bracket.rightFraction
+            } else {
                 if state == .armed { state = .aligning }
                 previewFit = nil; previewDbhCm = nil; previewTier = nil
                 crosshairIsStable = false; isStable = false
                 distanceToStemCenterM = nil; guideRowWorldY = nil
                 resetBracketSettling()
-                liveStemMask = nil; segmentedExtent = nil
-                previewStatusText = "Finding stem…"
+                previewStatusText = liveMaskPreview.guidance(measurementReady: false)
                 return
             }
         }
@@ -896,6 +1031,9 @@ public final class DBHScanViewModel: ObservableObject {
             // unaffected (rho = −0.11). See `bracketDepthUnsettled`.
             previewFit = fit
             previewTier = fit?.tier
+            if segmentationDroveTheBracket {
+                autoAlignmentMessage = liveMaskPreview.guidance(measurementReady: fit != nil && fit?.tier != .red)
+            }
             previewDbhCm = settledBracketDiameterCm(
                 frame: frame, axis: bracketAxis,
                 leftFraction: geometry.left, rightFraction: geometry.right,
@@ -1330,9 +1468,31 @@ public final class DBHScanViewModel: ObservableObject {
     /// coordinate space (caller converts from view coords to depth
     /// coords via the ARKit displayTransform).
     public func tap(at tapPixel: SIMD2<Double>) {
-        if segmentationEnabled && !liveAutoHasLock {
-            captureRefusalReason = "No stem lock yet — keep the crosshair on the trunk, or use Adjust."
+        if segmentationDroveTheBracket {
+            captureFrozenAuto()
             return
+        }
+        let fieldId: String? = (state == .idle || state == .aligning || state == .armed) ? beginFieldCapture() : nil
+        if (state == .idle || state == .aligning || state == .armed) && fieldId == nil { return }
+        snapshotReference = nil; snapshotMask = nil; snapshotGuide = nil
+        snapshotContext = nil
+        var captureStarted = false
+        defer {
+            if let fieldId, !captureStarted {
+                let ai = fieldAI(applied: edgeAdjustActive || segmentationEnabled)
+                onFieldCaptureEvent?(.refused(id: fieldId,reason: captureRefusalReason ?? "capture_unavailable",ai: ai))
+                recordRefusedAIIfNeeded(id: fieldId,reason: captureRefusalReason ?? "capture_unavailable",ai: ai)
+            }
+        }
+        if segmentationEnabled {
+            let now = ProcessInfo.processInfo.systemUptime
+            if let frame = session.latestDepthFrame { validateLiveMask(for: frame, at: now) }
+            guard let bracket = liveMaskPreview.bracketForDepth(at: now) else {
+                captureRefusalReason = "Keep the crosshair on the trunk, or use Adjust."
+                return
+            }
+            edgeBracketLeftFraction = bracket.leftFraction
+            edgeBracketRightFraction = bracket.rightFraction
         }
         if let refusal = orientationRefusal(for: latestFrameForBracket) {
             captureRefusalReason = refusal
@@ -1386,6 +1546,8 @@ public final class DBHScanViewModel: ObservableObject {
         // automatic depth-walk reading it is not.
         burstUsedSegmentation = segmentationDroveTheBracket
         burstUsedBracket = edgeAdjustActive || burstUsedSegmentation
+        burstFieldAI = fieldAI(applied: burstUsedBracket)
+        burstAIRecordSource = aiSource(for: burstFieldAI)
         guard let frame = latestFrameForBracket,
               let axis = DBHEstimator.screenHorizontalGuideAxis(
                 frame: frame, tapPixel: tapPixel) else {
@@ -1419,12 +1581,14 @@ public final class DBHScanViewModel: ObservableObject {
         // Raw-capture arm: start a fresh representative-frame set and grab
         // the reference camera image at the burst's first moment.
         recordFrames.removeAll(keepingCapacity: true)
-        recordReferenceJPEG = rawCaptureEnabled ? session.currentCameraImageJPEG() : nil
+        let reference = rawCaptureEnabled ? session.currentCameraImageJPEGSnapshot() : nil
+        recordReferenceJPEG = reference?.data; recordReferenceImageMetadata = reference?.metadata
         // A new burst supersedes the previous capture's saved / NOT-saved pill.
         lastCaptureOutcome = nil
         captureSampleTotal = captureMode.frameCount(developerMode: developerMode)
         captureSampleIndex = 1
         captureGeneration &+= 1
+        captureStarted = true
         state = .capturing
         // Normal captures immediately commit the exact latched frame.
         // Developer captures add four distinct, compatible frames.
@@ -1437,11 +1601,166 @@ public final class DBHScanViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self, self.state == .capturing,
                       self.captureGeneration == generation else { return }
+                if let id = self.measurementId {
+                    self.onFieldCaptureEvent?(.refused(id: id,reason: "fresh_depth_frame_timeout",ai: self.burstFieldAI))
+                    self.recordRefusedAIIfNeeded(id: id,reason: "fresh_depth_frame_timeout",ai: self.burstFieldAI)
+                }
                 self.retake()
                 self.captureRefusalReason = "Not enough fresh depth frames. Hold steady and retry."
             }
         }
     }
+
+    /// The live number/lock is advisory. Shutter inference must succeed on
+    /// its own RGB and depth, even if the last preview tick had no bracket.
+    private func captureFrozenAuto() {
+        guard state == .idle || state == .aligning || state == .armed else { return }
+        guard let id = beginFieldCapture() else { return }
+        snapshotReference = nil; snapshotMask = nil; snapshotGuide = nil
+        lastRecordedBundleID = nil; lastCaptureOutcome = nil
+        result = nil
+        snapshotContext = rawCaptureContext
+        #if canImport(CoreImage) && canImport(CoreVideo)
+        let viewport = viewSize
+        guard viewport.width > 1, viewport.height > 1 else {
+            captureRefusalReason = "Waiting for camera alignment."
+            onFieldCaptureEvent?(.refused(id: id,reason: "snapshot_viewport_unavailable",ai: fieldAI()))
+            return
+        }
+        pauseSegmentationFeed()
+        captureGeneration &+= 1
+        let generation = captureGeneration
+        let inferenceID = UUID().uuidString
+        let started = ProcessInfo.processInfo.systemUptime
+        let recordAI = rawCaptureEnabled && rawCapturePreserveAIInputs
+        let service = snapshotCaptureService
+        captureSampleTotal = captureMode.frameCount(developerMode: developerMode)
+        captureSampleIndex = 1
+        snapshotInferencePending = true
+        burstBuffer.removeAll(keepingCapacity: true)
+        recordFrames.removeAll(keepingCapacity: true); subSamples.removeAll(keepingCapacity: true)
+        recordReferenceJPEG = nil; recordReferenceImageMetadata = nil
+        captureRefusalReason = nil; lastCaptureOutcome = nil
+        state = .capturing
+        snapshotCaptureTask = Task { [weak self] in
+            // A depth image need not be available on the exact tap frame.
+            // Wait briefly for one paired frame, never substitute cached depth.
+            var pending: DBHCameraSnapshot?
+            repeat {
+                guard self?.captureGeneration == generation, self?.state == .capturing else { return }
+                pending = service.acquire()
+                if pending != nil { break }
+                try? await Task.sleep(for: .milliseconds(16))
+            } while ProcessInfo.processInfo.systemUptime - started < 0.25
+            guard let self,self.captureGeneration == generation,self.state == .capturing else { return }
+            guard let input = pending else {
+                self.snapshotInferencePending = false; self.captureSampleIndex = 0; self.state = .aligning
+                self.captureRefusalReason = "Waiting for a fresh camera and depth frame."
+                var ai = FieldAIProvenance(); ai.enabled = true; ai.reason = "snapshot_input_unavailable"
+                self.onFieldCaptureEvent?(.refused(id: id,reason: "snapshot_input_unavailable",ai: ai))
+                if self.segmentationEnabled { self.startSegmentationFeed() }
+                return
+            }
+            self.burstBuffer = [input.frame]
+            let progress = DBHSnapshotProgress()
+            let output: (RawCameraJPEG?, Result<YoloTrackedCapture, Error>)
+            do {
+                output = try await service.worker.run(timeout: service.processingTimeout) { work in
+                    let reference = input.referenceJPEG(); progress.setReference(reference)
+                    try work.checkCancellation()
+                    let tracked = Result { try work.retryBusy { try service.infer(input,viewport,inferenceID,recordAI,started) } }
+                    return (reference, tracked)
+                }
+            } catch {
+                guard self.captureGeneration == generation, self.state == .capturing,
+                      !(error is CancellationError) else { return }
+                let message: String
+                if let failure = error as? DeadlineWorkError {
+                    message = failure == .timedOut ? AutoSafetyPolicy.captureTimeoutMessage : AutoSafetyPolicy.captureBusyMessage
+                    // Temporary recovery, not a write to the user's default mode.
+                    self.edgeAdjustActive = true
+                } else { message = error.localizedDescription }
+                self.refuseFrozenAuto(id: id, reason: message,input: input,
+                    reference: progress.reference,tracked: nil,inferenceID: inferenceID)
+                return
+            }
+            guard self.captureGeneration == generation, self.state == .capturing else { return }
+            self.snapshotInferencePending = false
+            // Device motion after capture is irrelevant. A viewport/session
+            // change is not: it cancels instead of mixing coordinate spaces.
+            guard self.viewSize == viewport, self.orientationRefusal(for: input.frame) == nil else {
+                self.refuseFrozenAuto(id: id, reason: "Camera alignment changed. Retry capture.",
+                    input: input, reference: output.0, tracked: try? output.1.get(), inferenceID: inferenceID)
+                return
+            }
+            self.snapshotReference = output.0
+            let tracked = try? output.1.get()
+            let observation = tracked?.observation
+            var ai = FieldAIProvenance(); ai.enabled = true; ai.inferenceId = inferenceID
+            ai.reason = "shutter_rgb_depth_v1"
+            ai.inferenceRan = tracked != nil; ai.maskDetected = observation?.mask != nil
+            self.burstFieldAI = ai; self.burstAIRecordSource = tracked?.source
+            if self.rawCaptureEnabled && output.0 == nil {
+                self.refuseFrozenAuto(id: id,reason: "Capture RGB could not be preserved. Retry capture.",
+                    input: input,reference: nil,tracked: tracked,inferenceID: inferenceID)
+                return
+            }
+            guard observation?.mask != nil, let guide = LiveStemMaskPreview.validGuide(observation?.guideExtent),
+                  let geometry = DBHEstimator.bracketDepthGeometry(frame: input.frame,
+                    leftFraction: guide.leftFraction, rightFraction: guide.rightFraction, viewSize: viewport) else {
+                let reason: String
+                if case .failure(let error) = output.1 { reason = error.localizedDescription }
+                else { reason = "No stem at the crosshair. Aim at the trunk or use Adjust." }
+                self.refuseFrozenAuto(id: id, reason: reason, input: input, reference: output.0,
+                    tracked: tracked, inferenceID: inferenceID)
+                return
+            }
+            self.burstFieldAI.boundaryApplied = true
+            self.snapshotMask = observation?.mask; self.snapshotGuide = guide; self.snapshotViewSize = viewport
+            self.burstUsedBracket = true; self.burstUsedSegmentation = true
+            self.burstViewSize = viewport; self.burstScreenLeft = guide.leftFraction; self.burstScreenRight = guide.rightFraction
+            self.burstBracketLeft = geometry.left; self.burstBracketRight = geometry.right; self.burstBracketAxis = geometry.axis
+            switch geometry.axis {
+            case .row(let y): self.burstTap = SIMD2(Double(input.frame.width)/2, Double(y))
+            case .col(let x): self.burstTap = SIMD2(Double(x), Double(input.frame.height)/2)
+            }
+            self.edgeBracketLeftFraction = guide.leftFraction; self.edgeBracketRightFraction = guide.rightFraction
+            self.recordReferenceJPEG = self.rawCaptureEnabled ? output.0?.data : nil
+            self.recordReferenceImageMetadata = self.rawCaptureEnabled ? output.0?.metadata : nil
+            if self.captureSampleTotal == 1 { self.finishSubSample() }
+            else {
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard let self, self.captureGeneration == generation, self.state == .capturing else { return }
+                    self.refuseFrozenAuto(id: id, reason: "Not enough fresh depth frames. Retry capture.",
+                        input: input, reference: output.0, tracked: tracked, inferenceID: inferenceID)
+                }
+            }
+        }
+        #else
+        captureRefusalReason = "AI capture is unavailable. Use Adjust."
+        onFieldCaptureEvent?(.refused(id: id, reason: "ai_runtime_unavailable", ai: fieldAI()))
+        #endif
+    }
+
+    #if canImport(CoreImage) && canImport(CoreVideo)
+    private func refuseFrozenAuto(id: String, reason: String, input: DBHCameraSnapshot,
+                                  reference: RawCameraJPEG?, tracked: YoloTrackedCapture?, inferenceID: String) {
+        var ai = FieldAIProvenance(); ai.enabled = true; ai.inferenceRan = tracked != nil
+        ai.reason = "shutter_rgb_depth_v1"
+        ai.maskDetected = tracked?.observation?.mask != nil; ai.inferenceId = ai.inferenceRan ? inferenceID : nil
+        burstFieldAI = ai; burstAIRecordSource = tracked?.source
+        onFieldCaptureEvent?(.refused(id: id, reason: reason, ai: ai))
+        recordRefusedAIIfNeeded(id: id, reason: reason, ai: ai, snapshot: input.frame, reference: reference)
+        clearLiveAutoLock()
+        previewFit = nil; previewDbhCm = nil; previewTier = nil; distanceToStemCenterM = nil
+        resetBracketSettling()
+        snapshotInferencePending = false; captureGeneration &+= 1
+        burstBuffer.removeAll(keepingCapacity: true); captureSampleIndex = 0
+        captureRefusalReason = reason; state = .aligning
+        if segmentationEnabled { startSegmentationFeed() }
+    }
+    #endif
 
     /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
     ///
@@ -1458,16 +1777,23 @@ public final class DBHScanViewModel: ObservableObject {
         return Self.noTrunkLockText
     }
 
-    /// Exactly the condition `tap(at:)` requires, kept as one expression so a
-    /// refusal banner cannot outlive the state it describes.
+    /// A usable live preview can clear a previous aiming refusal. This is
+    /// NOT Auto's shutter gate: Auto validates its own frozen input instead.
     private var canCaptureNow: Bool {
-        guard !segmentationEnabled || liveAutoHasLock else { return false }
+        guard !segmentationEnabled || liveAutoHasBracket else { return false }
         guard orientationRefusal(for: latestFrameForBracket) == nil else { return false }
         let stageOK = (edgeAdjustActive || segmentationDroveTheBracket)
             ? (state == .armed || state == .aligning)
             : state == .armed
         guard stageOK, let fit = previewFit, fit.tier != .red else { return false }
         return true
+    }
+
+    /// Read-only presentation of the SAME scene/viewport gate used by capture.
+    /// Auto can legitimately have no live diameter while looking for a stem;
+    /// that must not be confused with stale or rotated camera coordinates.
+    public var cameraAlignmentAccessibilityValue: String {
+        orientationRefusal(for: latestFrameForBracket) ?? "Camera view aligned"
     }
 
     private func orientationRefusal(for frame: ARDepthFrame?) -> String? {
@@ -1508,12 +1834,19 @@ public final class DBHScanViewModel: ObservableObject {
     }
 
     public func retake() {
+        snapshotCaptureTask?.cancel(); snapshotCaptureTask = nil
+        snapshotInferencePending = false
+        snapshotReference = nil; snapshotMask = nil; snapshotGuide = nil
+        if let measurementId { onFieldCaptureEvent?(.abandoned(id: measurementId,reason: "retake")) }
+        measurementId = nil; userAdjustedBoundary = false; lastSuccessfulInferenceId = nil
+        boundaryInferenceId = nil; lastInferenceHadMask = false
+        latestAIRecordSource = nil; boundaryAIRecordSource = nil; burstAIRecordSource = nil
         clearLiveAutoLock()
         captureRefusalReason = nil
         burstBuffer.removeAll()
         subSamples.removeAll(keepingCapacity: true)
         recordFrames.removeAll(keepingCapacity: true)
-        recordReferenceJPEG = nil
+        recordReferenceJPEG = nil; recordReferenceImageMetadata = nil
         lastCaptureOutcome = nil
         // The previous bundle is no longer "the capture on screen". In the
         // cruise tally the loop retakes between trees, and a truth typed for
@@ -1527,11 +1860,17 @@ public final class DBHScanViewModel: ObservableObject {
         acquisitionStalled = false
         lastFitTime = ProcessInfo.processInfo.systemUptime
         state = isLiDARSupported ? .aligning : .manualEntry
+        if segmentationEnabled { startSegmentationFeed() }
     }
 
     public func accept() {
         guard let r = result, r.confidence != .red else { return }
         state = .accepted
+    }
+
+    /// Raw adoption is confirmed only after the application's durable save.
+    public func confirmResultStored(id: String) {
+        guard measurementId == id, lastRecordedBundleID == id else { return }
         markLastBundleAccepted()
     }
 
@@ -1553,7 +1892,7 @@ public final class DBHScanViewModel: ObservableObject {
     /// is still running (the store parks it and the writer folds it in).
     private func markLastBundleAccepted() {
         guard rawCaptureEnabled, let id = lastRecordedBundleID else { return }
-        Task.detached(priority: .utility) {
+        PendingWorkRegistry.rawCapture.submit {
             _ = RawCaptureStore.markAccepted(id: id)
         }
     }
@@ -1575,6 +1914,9 @@ public final class DBHScanViewModel: ObservableObject {
         guard let typed = TruthInput.parsePositive(manualDbhCm) else { return }
         let cm = unitSystem == .imperial ? Units.inchesToCm(typed) : typed
         guard cm > 0 else { return }
+        guard let id = beginFieldCapture(typed: true) else { return }
+        var typedAI = FieldAIProvenance(); typedAI.reason = "typed_measurement"
+        onFieldCaptureEvent?(.result(id: id,value: Double(Float(cm)),sigma: nil,valid: true,reason: nil,ai: typedAI))
         resultCapturedManually = false
         resultCaptureMode = "auto"
         result = DBHResult(
@@ -1593,6 +1935,14 @@ public final class DBHScanViewModel: ObservableObject {
 
     /// Estimate the latched frame/window with the existing estimator, then finalize.
     private func finishSubSample() {
+        if let reason = fieldCapturePermission?(false,true) {
+            captureRefusalReason = reason
+            if let measurementId { onFieldCaptureEvent?(.refused(id: measurementId,reason: reason,ai: burstFieldAI)) }
+            burstBuffer.removeAll(keepingCapacity: true); subSamples.removeAll(keepingCapacity: true)
+            captureGeneration &+= 1; state = .aligning
+            if segmentationEnabled { startSegmentationFeed() }
+            return
+        }
         let frames = burstBuffer
         burstBuffer.removeAll(keepingCapacity: true)
         // Replay receives every frame used, not a representative subset.
@@ -1646,6 +1996,11 @@ public final class DBHScanViewModel: ObservableObject {
             state = .rejected
         }
         resultGeneration &+= 1
+        if let measurementId {
+            onFieldCaptureEvent?(.result(id: measurementId,value: result.map { Double($0.diameterCm) },
+                sigma: result.map { Double($0.sigmaRmm) },valid: state == .fitted,
+                reason: result?.rejectionReason ?? (result == nil ? "no_valid_depth_result" : nil),ai: burstFieldAI))
+        }
         recordRawBurstIfNeeded()
     }
 
@@ -1670,6 +2025,8 @@ public final class DBHScanViewModel: ObservableObject {
         guard rawCaptureEnabled else { return }
         guard !recordFrames.isEmpty else {
             lastCaptureOutcome = .failed(reason: "no depth frames in the burst")
+            if let measurementId { onFieldCaptureEvent?(.raw(id: measurementId,status: .failed,reason: "no depth frames in the burst",replayValue: nil)) }
+            if let measurementId { recordRefusedAIIfNeeded(id: measurementId,reason: "no_depth_frames",ai: burstFieldAI) }
             return
         }
         let framesToRecord = recordFrames
@@ -1689,21 +2046,66 @@ public final class DBHScanViewModel: ObservableObject {
             viewportSize: burstUsedBracket
                 ? [Double(burstViewSize.width), Double(burstViewSize.height)] : nil)
         let manual = burstUsedBracket
-        let ctx = rawCaptureContext
+        let ctx = snapshotContext ?? rawCaptureContext
         let jpeg = recordReferenceJPEG
+        let imageMetadata = recordReferenceImageMetadata
         let gps = rawCaptureGPS
-        recordReferenceJPEG = nil
-        let id = UUID().uuidString
+        recordReferenceJPEG = nil; recordReferenceImageMetadata = nil
+        guard let id = measurementId else { lastCaptureOutcome = .failed(reason: "measurement identity unavailable"); return }
         lastRecordedBundleID = id
         lastCaptureOutcome = nil
-        Task.detached(priority: .utility) { [weak self] in
+        let captured = RawCaptureEvidence(measurementId: id,resultSeconds: ProcessInfo.processInfo.systemUptime,
+            displayedResult: .init(value: result.map { Double($0.diameterCm) },sigma: result.map { Double($0.sigmaRmm) },
+                tier: result?.confidence.rawValue,method: result?.method.rawValue,valid: state == .fitted),ai: burstFieldAI)
+        let aiRequest = RawAIWriteRequest(requested: rawCapturePreserveAIInputs,ai: burstFieldAI,source: burstAIRecordSource)
+        burstAIRecordSource = nil
+        let fieldEvent = onFieldCaptureEvent
+        let publish: @MainActor @Sendable (RawCaptureOutcome,Double?,String?,String?) -> Void = { [weak self] outcome,replayed,status,warning in
+            if self?.measurementId == id { self?.lastCaptureOutcome = outcome; self?.rawAIRecordingWarning = warning }
+            switch outcome {
+            case .saved:
+                fieldEvent?(.raw(id: id,status: .saved,reason: warning ?? status.flatMap { $0 == "pass" ? nil : "original_input_replay_"+$0 },replayValue: replayed))
+            case .failed(let reason): fieldEvent?(.raw(id: id,status: .failed,reason: reason,replayValue: nil))
+            }
+        }
+        PendingWorkRegistry.rawCapture.submit {
             let outcome = RawCaptureRecorder.recordDBH(
                 id: id,
                 frames: framesToRecord, tapPixel: tap, calibration: cal,
                 algorithm: algo, bracket: bracket, guideAxis: axis,
                 captureManual: manual, context: ctx,
-                referenceJPEG: jpeg, gps: gps)
-            await MainActor.run { self?.lastCaptureOutcome = outcome }
+                referenceJPEG: jpeg, gps: gps,referenceImageMetadata: imageMetadata,captureEvidence: captured,aiRequest: aiRequest)
+            let proof = RawCaptureStore.loadManifest(id: id)?.captureEvidence
+            await publish(outcome,proof?.replayValue,proof?.replayStatus,proof?.aiRecordingWarning)
+        }
+    }
+
+    private func recordRefusedAIIfNeeded(id: String,reason: String,ai: FieldAIProvenance,
+                                       snapshot: ARDepthFrame? = nil,reference: RawCameraJPEG? = nil) {
+        guard rawCaptureEnabled else { return }
+        let source = aiSource(for: ai)
+        guard snapshot != nil || (rawCapturePreserveAIInputs && source != nil) else { return }
+        let request = RawAIWriteRequest(requested: rawCapturePreserveAIInputs,ai: ai,source: source)
+        let context = snapshotContext ?? rawCaptureContext,cal = calibration,gps = rawCaptureGPS,event = onFieldCaptureEvent
+        var evidence = RawCaptureEvidence(measurementId: id,resultSeconds: ProcessInfo.processInfo.systemUptime,
+            displayedResult: .init(value: nil,sigma: nil,tier: nil,method: nil,valid: false),ai: ai)
+        evidence.attemptFailureReason = reason
+        let publish: @MainActor @Sendable (RawCaptureOutcome) -> Void = { [weak self] outcome in
+            if self?.measurementId == id {
+                self?.lastCaptureOutcome = outcome
+                if case .failed(let why) = outcome { self?.rawAIRecordingWarning = "AI attempt input NOT saved: "+why }
+            }
+        }
+        PendingWorkRegistry.rawCapture.submit { [evidence] in
+            let outcome = RawCaptureRecorder.recordRefusedAttempt(id: id,calibration: cal,context: context,gps: gps,
+                evidence: evidence,aiRequest: request,snapshot: snapshot,reference: reference)
+            await publish(outcome)
+            await MainActor.run {
+                switch outcome {
+                case .saved: event?(.raw(id: id,status: .saved,reason: "attempt_input_only: "+reason,replayValue: nil))
+                case .failed(let why): event?(.raw(id: id,status: .failed,reason: why,replayValue: nil))
+                }
+            }
         }
     }
 

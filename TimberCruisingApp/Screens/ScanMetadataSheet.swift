@@ -195,6 +195,7 @@ public struct ScanMetadataSheet: View {
 public struct SpeciesPickerField: View {
 
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var environment: AppEnvironment
     @Binding public var speciesCode: String?
     public var unspecifiedLabel: String = "— Unspecified —"
     public var compact: Bool = false
@@ -203,6 +204,7 @@ public struct SpeciesPickerField: View {
 
     @State private var promptingForCode = false
     @State private var typedCode = ""
+    @State private var browsingSpecies = false
 
     public init(speciesCode: Binding<String?>,
                 unspecifiedLabel: String = "— Unspecified —",
@@ -218,6 +220,7 @@ public struct SpeciesPickerField: View {
 
     public var body: some View {
         Menu {
+            Button("Browse species…") { browsingSpecies = true }
             Button("— Unspecified —") {
                 speciesCode = nil
                 onPick?()
@@ -257,6 +260,13 @@ public struct SpeciesPickerField: View {
             }
         }
         .accessibilityIdentifier("speciesPicker")
+        .sheet(isPresented: $browsingSpecies) {
+            NavigationStack {
+                SpeciesSettingsScreen(catalog: environment.speciesCatalog) { selected in
+                    speciesCode = selected.code; onPick?()
+                }
+            }
+        }
         .alert("Species code", isPresented: $promptingForCode) {
             TextField("Code not in the list", text: $typedCode)
             Button("Cancel", role: .cancel) {}
@@ -278,7 +288,7 @@ public struct SpeciesPickerField: View {
         guard let match = speciesOptions.first(where: { $0.0 == code }) else {
             // A code the list does not carry is shown as typed, not silently
             // relabelled to something the cruiser did not choose.
-            return AttributedString(code)
+            return AttributedString(RegionalSpecies.name(forCode: code))
         }
         return Self.pickerLabel(name: match.1, code: match.0)
     }
@@ -288,13 +298,14 @@ public struct SpeciesPickerField: View {
     /// resolves its per-region FIA presets; metric countries carry a flat
     /// national list.
     private var speciesOptions: [(String, String)] {
-        settings.country.speciesPresets(region: settings.region) + [("OT", "Other")]
+        environment.speciesCatalog.options(country: settings.country, region: settings.region).map { ($0.code, $0.commonName) }
     }
 
     /// Name-first option label: the common name reads prominently, the
     /// FIA code trails as a dim secondary suffix (" · DF"). Selecting the
     /// row still stores the code — this only reshapes what's shown.
     private static func pickerLabel(name: String, code: String) -> AttributedString {
+        if code.hasPrefix("USR-") { return AttributedString(name) }
         var label = AttributedString(name)
         var suffix = AttributedString(" · \(code)")
         suffix.foregroundColor = ForestixPalette.textSecondary

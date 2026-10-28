@@ -28,6 +28,9 @@ import simd
 public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
+    @StateObject private var fieldCapture = FieldCaptureCoordinator()
+    @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
+    @Environment(\.fieldStudyStore) private var fieldStudyStore
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
@@ -79,13 +82,17 @@ public struct HeightScanScreen: View {
         /// was typed — never a zero, which would read as a pole that measured
         /// nothing.
         public var truth: Double?
+        public var measurementId: String?
+        public var fieldReceipt: FieldResultReceipt?
+        public var fieldTarget: FieldStudyTarget?
+        public var fieldScope: FieldMeasurementScope?
         public init(speciesCode: String? = nil,
                     damageCodes: [String] = [],
                     note: String = "",
                     photoPath: String? = nil,
                     latitude: Double? = nil,
                     longitude: Double? = nil,
-                    truth: Double? = nil) {
+                    truth: Double? = nil,measurementId: String? = nil,fieldReceipt: FieldResultReceipt? = nil,fieldTarget: FieldStudyTarget? = nil,fieldScope: FieldMeasurementScope? = nil) {
             self.speciesCode = speciesCode
             self.damageCodes = damageCodes
             self.note = note
@@ -93,6 +100,9 @@ public struct HeightScanScreen: View {
             self.latitude = latitude
             self.longitude = longitude
             self.truth = truth
+            self.measurementId = measurementId; self.fieldReceipt = fieldReceipt
+            self.fieldTarget = fieldTarget
+            self.fieldScope = fieldScope
         }
     }
 
@@ -199,6 +209,13 @@ public struct HeightScanScreen: View {
     /// bundle and hand-measured truth. Both are now threaded in by the host.
     private let projectID: String?
     private let treeNumber: Int?
+    private let quickPlotID: UUID?
+    private let allowsFieldTargetSelection: Bool
+    private let onSelectFieldTarget: ((String) async throws -> Void)?
+    private let fieldTarget: FieldStudyTarget?
+    private let fieldTargetLocked: Bool
+    private let fieldScope: FieldMeasurementScope?
+    private let uiFlow: FieldUIFlowClock?
 
     /// The scoped tree's own name, when the cruiser gave it one. DISPLAY
     /// ONLY — the raw-capture join key stays `treeNumber`, which is the
@@ -226,6 +243,13 @@ public struct HeightScanScreen: View {
                 cruisePlotInfo: PlotMiniMapInfo? = nil,
                 projectID: String? = nil,
                 treeNumber: Int? = nil,
+                quickPlotID: UUID? = nil,
+                fieldTarget: FieldStudyTarget? = nil,
+                fieldTargetLocked: Bool = false,
+                fieldScope: FieldMeasurementScope? = nil,
+                uiFlow: FieldUIFlowClock? = nil,
+                allowsFieldTargetSelection: Bool = true,
+                onSelectFieldTarget: ((String) async throws -> Void)? = nil,
                 treeName: String? = nil,
                 initialSpeciesCode: String? = nil,
                 onEditPlot: (() -> Void)? = nil) {
@@ -241,6 +265,12 @@ public struct HeightScanScreen: View {
         self.cruisePlotInfo = cruisePlotInfo
         self.projectID = projectID
         self.treeNumber = treeNumber
+        self.quickPlotID = quickPlotID; self.allowsFieldTargetSelection = allowsFieldTargetSelection
+        self.fieldTarget = fieldTarget
+        self.fieldTargetLocked = fieldTargetLocked
+        self.fieldScope = fieldScope
+        self.uiFlow = uiFlow
+        self.onSelectFieldTarget = onSelectFieldTarget
         self.treeName = treeName
         self.onEditPlot = onEditPlot
     }
@@ -282,6 +312,10 @@ public struct HeightScanScreen: View {
     @State private var crownHeightM: Double?
 
     public var body: some View {
+        scanContent.modifier(FieldTargetSwitchPresentation(coordinator: fieldTargetSwitch))
+    }
+
+    private var scanContent: some View {
         ZStack {
             // Live AR camera feed shared with the HeightScanViewModel's
             // session. The scene markers come from the VM and pin the
@@ -297,6 +331,18 @@ public struct HeightScanScreen: View {
                          raycaster: raycaster)
                 .ignoresSafeArea()
             overlayChrome
+            if !hidingChromeForCapture {
+                VStack(spacing: 4) {
+                    FieldScanIdentityBadge(coordinator: fieldCapture,kind: .height).allowsHitTesting(false)
+                    FieldReferencePeek(capture: fieldCapture,kind: .height)
+                    FieldCaptureWarning(coordinator: fieldCapture).allowsHitTesting(false)
+                }.frame(maxWidth: .infinity,maxHeight: .infinity,alignment: .top)
+                    .padding(.top,110).zIndex(20)
+            }
+            if !hidingChromeForCapture, !crownActive {
+                FieldStudyCameraTargets(raycaster: raycaster,canSelect: anchorAiming && allowsFieldTargetSelection,capture: fieldCapture,
+                    onSelect: onSelectFieldTarget == nil ? nil : selectFieldTarget)
+            }
             // Everything below is 2D chrome — hidden as one block while
             // the Accept-time window snapshot is captured so the JPEG
             // shows only the AR feed + measurement overlays.
@@ -471,12 +517,14 @@ public struct HeightScanScreen: View {
         .onAppear {
             hasLeftScreen = false
             configureRawCapture()
+            fieldCapture.appeared()
             viewModel.onAppear()
         }
         // View removal, NOT backgrounding (the scenePhase handler below calls
         // `onDisappear` too) — so the trunk anchor is released here and only
         // here, and survives a phone call taken mid-walk.
         .onDisappear {
+            fieldCapture.foreground(false); fieldCapture.close()
             // Leaving without accepting: the held frame belongs to a
             // measurement that was never stored, so the file goes with it.
             // Anything already handed to a reading was released at Accept, so
@@ -559,7 +607,9 @@ public struct HeightScanScreen: View {
                         // The pole value rides WITH the reading. Read before
                         // `applyTypedTruth` runs, because that call clears the
                         // field once the value is durable on the bundle.
-                        truth: typedTruthForThisMeasurement)
+                        truth: typedTruthForThisMeasurement,measurementId: viewModel.measurementId,
+                        fieldReceipt: viewModel.measurementId.map { fieldCapture.receipt(id: $0) },
+                        fieldTarget: fieldCapture.displayRecord?.targetSnapshot,fieldScope: fieldCapture.displayRecord?.measurementScope)
                     // The host reports whether the reading actually reached
                     // storage. A dropped height used to be indistinguishable
                     // from a saved one (the cover closed either way), which is
@@ -574,13 +624,16 @@ public struct HeightScanScreen: View {
                         // crown-moment frame goes with it.
                         heldPhoto = nil
                     } else {
+                        if let id = viewModel.measurementId { fieldCapture.resultSaveFailed(id: id,reason: "application_result_write_failed") }
                         heightSaveFailure = treeTitle.map {
                             "Height NOT saved to \($0) — the tree row couldn't be updated. Tap Accept again."
                         } ?? "Height NOT saved — the tree row couldn't be updated. Tap Accept again."
                         // Back to the result panel so the value is still on
                         // screen and Accept is tappable again.
                         viewModel.acceptFailed()
+                        return
                     }
+                    if let id = meta.measurementId { viewModel.confirmResultStored(id: id) }
                     // Raw-capture (developer mode): attach the clinometer /
                     // Vertex truth to the just-recorded bundle. The id is
                     // minted synchronously at compute, so this works even when
@@ -598,6 +651,7 @@ public struct HeightScanScreen: View {
                 note: $metaNote)
         }
         .onChange(of: scenePhase) { _, phase in
+            fieldCapture.foreground(phase == .active)
             // Same rationale as DBH scan: without this the ARKit
             // session, CoreMotion pitch buffer, and depth subscription
             // all keep running while the app is backgrounded.
@@ -961,6 +1015,14 @@ public struct HeightScanScreen: View {
         viewModel.state == .idle || viewModel.state == .anchorSet
     }
 
+    private func selectFieldTarget(_ id: String) {
+        guard anchorAiming,let action = onSelectFieldTarget,fieldTarget?.id != id else { return }
+        fieldTargetSwitch.request(targetId: id,label: fieldStudyStore?.activeTargets.first(where: { $0.id == id })?.treeId ?? "",
+            requiresConfirmation: !researchTrueText.isEmpty || !metaNote.isEmpty || !metaDamage.isEmpty || metaSpecies != nil) {
+                try await action(id)
+            }
+    }
+
     private var statusText: String {
         // Walk-off integrity beats stage guidance: "walk back" is useless
         // advice while the camera has no idea where it is, and the trunk
@@ -1128,6 +1190,8 @@ public struct HeightScanScreen: View {
         // had to retype. Same value the raw-capture bundle and the saved
         // reading carry, so the three join.
         f["tree_id"] = treeNumber.map(String.init) ?? ""
+        f["measurement_id"] = viewModel.measurementId ?? ""
+        f["save_event"] = "saved"
         if let t = typedTruthForThisMeasurement {
             // `true_value` and `error` are in the row's `unit` (m) — the same
             // scale as `measured_value`, so the error column stays
@@ -1375,9 +1439,6 @@ public struct HeightScanScreen: View {
                     }
                     // Developer mode on, recording off ⇒ this session is
                     // producing NO corpus. Say so where the truth is typed.
-                    if !settings.rawCaptureEnabled {
-                        RawCaptureOffNotice()
-                    }
                 }
             }
         }
@@ -1802,11 +1863,21 @@ public struct HeightScanScreen: View {
     /// on any join-key change, and again at the anchor tap that opens a
     /// measurement, so the bundle carries the tree it actually documents.
     private func configureRawCapture() {
+        fieldCapture.configure(store: fieldStudyStore,kind: .height,settings: settings,calibration: viewModel.calibration,context: [
+            "application.mode": cruisePlotInfo != nil ? "cruise" : "quick",
+            "application.project_id": projectID ?? "", "application.plot_id": (cruisePlotInfo?.plotID ?? quickPlotID)?.uuidString ?? "",
+            "application.tree_number": treeNumber.map(String.init) ?? ""],targetOverride: fieldTarget,useGlobalTarget: !fieldTargetLocked,uiFlow: uiFlow,scopeOverride: fieldScope)
+        let coordinator = fieldCapture
+        viewModel.onFieldCaptureEvent = { coordinator.handle($0) }
+        viewModel.fieldCapturePermission = { [weak vm = viewModel] typed,continuing in
+            guard let vm else { return "Measurement screen closed." }
+            return coordinator.capturePermission(typed: typed,continuing: continuing,calibration: vm.calibration)
+        }
         viewModel.rawCaptureEnabled = settings.developerMode && settings.rawCaptureEnabled
         viewModel.rawCaptureContext = RawCaptureContext(
             mode: cruisePlotInfo != nil ? "cruise" : "quick",
             projectID: projectID,
-            plotID: cruisePlotInfo?.plotID?.uuidString,
+            plotID: (cruisePlotInfo?.plotID ?? quickPlotID)?.uuidString,
             treeNumber: treeNumber,
             units: settings.unitSystem.rawValue)
         viewModel.rawCaptureGPS = Self.currentGPS()

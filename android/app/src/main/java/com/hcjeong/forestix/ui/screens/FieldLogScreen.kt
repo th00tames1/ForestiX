@@ -173,7 +173,6 @@ import com.hcjeong.forestix.ui.screens.plot.PlotSummaryCard
 import com.hcjeong.forestix.ui.screens.tree.TierExplainerKind
 import com.hcjeong.forestix.ui.screens.tree.TierExplainerSheet
 import com.hcjeong.forestix.ui.screens.tree.TreeFormComputedSection
-import com.hcjeong.forestix.ui.screens.tree.TreeFormConfidenceRow
 import com.hcjeong.forestix.ui.screens.tree.TreeFormMeasurementRow
 import com.hcjeong.forestix.ui.screens.tree.TreeFormRow
 import com.hcjeong.forestix.ui.screens.tree.TreeFormSection
@@ -197,6 +196,10 @@ import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import com.hcjeong.forestix.data.fieldstudy.FieldResultTargetBinding
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyException
 
 @OptIn(ExperimentalMaterial3Api::class)
 /// [initialScope] is what the log opens on. The cruise project sheet passes
@@ -221,6 +224,8 @@ fun FieldLogScreen(
     /// when the sheet opened would keep showing the number just replaced.
     /// Null = closed.
     var inspectingId by remember { mutableStateOf<String?>(null) }
+    var rescanScopeFailure by remember { mutableStateOf<String?>(null) }
+    var rescanScopeBusy by remember { mutableStateOf(false) }
     /// The row a swipe asked to delete, held until the cruiser confirms.
     /// Only multi-reading rows go through here (see onDelete below).
     var pendingDelete by remember { mutableStateOf<FieldLogRowModel?>(null) }
@@ -540,7 +545,7 @@ fun FieldLogScreen(
                         },
                         onClick = {
                             menuOpen = false
-                            scope.launch { env.history.exportBundle(settings.logRule)?.let { shareFile(context, it, "application/zip") } }
+                            scope.launch { env.history.exportBundle(settings.logRule, settings.country)?.let { shareFile(context, it, "application/zip") } }
                         })
                 }
             }
@@ -1032,27 +1037,44 @@ fun FieldLogScreen(
                     onSave = { env.history.update(it) },
                     onAdd = { env.history.append(it) },
                     onRowMoved = { inspectingId = it },
-                    onRemeasure = { kind, tree, name, species, truth, truthSource, truthUnit ->
+                    onRemeasure = remeasure@ { kind, tree, name, species, truth, truthSource, truthUnit ->
                         // Close the sheet before leaving the screen, and hand
                         // the scan the tree it must land on plus the truth it
                         // must carry across (PendingTreeNumber is the same
                         // slot the map home's tree lock uses). The plot is
                         // named explicitly: this row can belong to a plot
                         // that is not the active one.
+                        if(rescanScopeBusy)return@remeasure
+                        rescanScopeBusy=true
                         inspectingId = null
-                        PendingTreeNumber.set(
-                            number = tree, name = name, speciesCode = species,
-                            replaceExisting = true, truth = truth,
-                            truthSource = truthSource, truthUnit = truthUnit,
-                            plotID = live.entries.firstOrNull()?.plotID)
-                        nav.navigate(
-                            if (kind == MeasureKind.DBH) Routes.DBH else Routes.HEIGHT)
+                        val sourceIds=live.entries.map{it.id.toString()}
+                        val origin=nav.currentBackStackEntry
+                        scope.launch{
+                            try{
+                                env.fieldStudy.awaitPendingWrites();kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                if(nav.currentBackStackEntry!=origin)return@launch
+                                val study=env.fieldStudy.state.value
+                                val target=if(study.configuration.enabled){
+                                    if(!study.loaded||study.error!=null)throw FieldStudyException("missing","Field-study archive unavailable")
+                                    FieldResultTargetBinding.resolve(sourceIds,"quick_history",study.configuration.studyId,study.measurements,study.activeTargets)
+                                }else null
+                                PendingTreeNumber.set(number=tree,name=name,speciesCode=species,replaceExisting=true,truth=truth,
+                                    truthSource=truthSource,truthUnit=truthUnit,plotID=live.entries.firstOrNull()?.plotID,
+                                    fieldTarget=target,fieldTargetLocked=true)
+                                nav.navigate(if(kind==MeasureKind.DBH)Routes.DBH else Routes.HEIGHT)
+                            }catch(e:CancellationException){throw e}
+                            catch(e:Exception){rescanScopeFailure=e.message?:"Measurement target unavailable"}
+                            finally{rescanScopeBusy=false}
+                        }
                     },
                 )
             }
         }
     }
 
+    rescanScopeFailure?.let{message->AlertDialog(onDismissRequest={rescanScopeFailure=null},
+        title={Text("Measurement target unavailable")},text={Text(message)},
+        confirmButton={TextButton(onClick={rescanScopeFailure=null}){Text("OK")}})}
     // EVERY swipe asks, and names what it is about to take.
     //
     // This used to confirm only for a row carrying several readings and
@@ -1563,7 +1585,7 @@ private fun CapacityBanner() {
             horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
         ) {
             Icon(Icons.Filled.Warning, contentDescription = null, tint = colors.confidenceWarn, modifier = Modifier.size(16.dp))
-            Text("Log nearly full. Export soon to free space.", style = type.caption, color = colors.textSecondary)
+            Text("Large log. Export a backup. Older measurements are retained.", style = type.caption, color = colors.textSecondary)
         }
     }
 }
@@ -2094,22 +2116,6 @@ internal fun FieldLogDetailSheet(
                             unitSystem = unitSystem, developerMode = developerMode,
                             onSave = onSave, onAdd = onAdd, onRemeasure = onRemeasure)
                     }
-                }
-                TreeFormConfidenceRow(
-                    label = if (isDbh) TreeFormWords.DBH_CONFIDENCE
-                    else TreeFormWords.HEIGHT_CONFIDENCE,
-                    // NOT the grade a typed number inherited. `typedValue`
-                    // clears the σ of a reading the cruiser overrode but keeps
-                    // `confidenceRaw`, so without this the chip beside a
-                    // hand-typed diameter is the last capture's Good/Fair/Check
-                    // — a sensor's verdict on a number no sensor produced. A
-                    // reading with no capture behind it has no grade, and the
-                    // row says so with the em dash it uses for every ungraded
-                    // measurement.
-                    tier = existing?.takeIf { !it.isTypedReading }?.confidenceRaw,
-                ) {
-                    explaining = if (isDbh) TierExplainerKind.DIAMETER
-                    else TierExplainerKind.HEIGHT
                 }
             }
         }

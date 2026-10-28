@@ -52,7 +52,7 @@ class FullSpanGeometryTest {
             assertEquals(auto.diameterCm.toDouble(),manual.diameterCm,1e-5)
             assertEquals(1f,auto.distanceM,1e-6f)
             val span=if(column)30.0 else 40.0;val focal=if(column)150.0 else 100.0
-            assertEquals(BoundaryAlignment.fullSpanDiameterCm(span,1.0,focal)!!,auto.diameterCm.toDouble(),1e-5)
+            assertEquals(BoundaryAlignment.sampledDiameterCm(span,1.0,focal)!!,auto.diameterCm.toDouble(),1e-5)
             val actual=DBHEstimator.estimateChord(listOf(f),60.0,45.0,axis,ProjectCalibration())!!
             assertEquals(auto.diameterCm,actual.diameterCm,1e-4f)
         }

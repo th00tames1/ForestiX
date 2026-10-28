@@ -11,13 +11,11 @@
 //
 // CROSS-PLATFORM: the manifest schema is byte-identical (key spelling) to
 // the Android sibling — see MANIFEST SCHEMA below. iOS depth format is
-// "f32m" (native metres, row-major little-endian); Android is "u16mm".
-// Both platforms DERIVE per-pixel confidence from the stored depth via the
-// shared valid-range rule (0.001–8.0 m → high, else hole), so no confidence
-// buffer is stored and a reconstructed frame is bit-consistent with what
-// the estimator re-consumes on replay. That is what lets the self-check be
-// an exact reproducibility proof (RANSAC is deterministically seeded, the
-// chord math is pure).
+// "f32m" (native metres, row-major little-endian); Android stores "u16mm"
+// or f32m when its native buffer was unavailable. Legacy descriptors may
+// omit confidence_file and then derive confidence from valid depth. Modern
+// capture_evidence separately preserves actual float depth, confidence and
+// clocks with checksums; canonical result_live is not the displayed result.
 //
 // COST WHEN OFF: nothing here runs unless the caller (a view model) is
 // gated on `developerMode && rawCaptureEnabled`.
@@ -82,6 +80,9 @@ public struct RawCaptureManifest: Codable, Sendable {
     public var replaySelfcheck: ReplaySelfcheck
     public var dbh: DBHBundle?
     public var height: HeightBundle?
+    public var measurementId: String? = nil
+    public var captureEvidence: RawCaptureEvidence? = nil
+    public var operatorEditId: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case schema, platform, device
@@ -92,6 +93,8 @@ public struct RawCaptureManifest: Codable, Sendable {
         case truth, gps
         case replaySelfcheck = "replay_selfcheck"
         case dbh, height
+        case measurementId = "measurement_id", captureEvidence = "capture_evidence"
+        case operatorEditId = "operator_edit_id"
     }
 
     public struct Context: Codable, Sendable {
@@ -120,11 +123,15 @@ public struct RawCaptureManifest: Codable, Sendable {
         /// elevation of the AR camera's forward axis, on both platforms.
         /// Optional so bundles written before the field existed still decode.
         public var heightAngleSource: String?
+        public var dbhDepthInputPolicy: String? = nil
+        public var dbhDepthCalibrationEpoch: Int? = nil
         enum CodingKeys: String, CodingKey {
             case algorithm, units
             case captureMode = "capture_mode"
             case calibration
             case heightAngleSource = "height_angle_source"
+            case dbhDepthInputPolicy = "dbh_depth_input_policy"
+            case dbhDepthCalibrationEpoch = "dbh_depth_calibration_epoch"
         }
         public init(algorithm: String, units: String, captureMode: String, calibration: Calibration,
                     heightAngleSource: String? = "camera_pose") {
@@ -326,7 +333,9 @@ public struct RawCaptureManifest: Codable, Sendable {
             public var depthFile: String
             public var width: Int
             public var height: Int
-            public var format: String       // "f32m"
+            public var format: String       // "f32m" | "u16mm"
+            public var confidenceFile: String?
+            public var depthInputPolicy: String?
             public var fx: Double
             public var fy: Double
             public var cx: Double
@@ -337,6 +346,8 @@ public struct RawCaptureManifest: Codable, Sendable {
             public var viewToDepth: [Double] // 6 (a,b,tx,c,d,ty)
             enum CodingKeys: String, CodingKey {
                 case depthFile = "depth_file"
+                case confidenceFile = "confidence_file"
+                case depthInputPolicy = "depth_input_policy"
                 case width, height, format, fx, fy, cx, cy
                 case tapPx = "tap_px"
                 case axis
@@ -345,11 +356,14 @@ public struct RawCaptureManifest: Codable, Sendable {
             }
             public init(depthFile: String, width: Int, height: Int, format: String,
                         fx: Double, fy: Double, cx: Double, cy: Double,
-                        tapPx: [Double], axis: String, cameraPose: [Double], viewToDepth: [Double]) {
+                        tapPx: [Double], axis: String, cameraPose: [Double], viewToDepth: [Double],
+                        confidenceFile: String? = nil, depthInputPolicy: String? = nil) {
                 self.depthFile = depthFile; self.width = width; self.height = height
                 self.format = format; self.fx = fx; self.fy = fy; self.cx = cx; self.cy = cy
                 self.tapPx = tapPx; self.axis = axis
                 self.cameraPose = cameraPose; self.viewToDepth = viewToDepth
+                self.confidenceFile = confidenceFile
+                self.depthInputPolicy = depthInputPolicy
             }
         }
 
@@ -433,10 +447,11 @@ public struct RawCaptureManifest: Codable, Sendable {
             // bundle can re-run depth-based height algorithms — not just the
             // tangent method. All optional: an old (schema 1) height capture
             // has none of these and still re-runs the tangent method exactly
-            // as before. `format` is platform-specific ("f32m" iOS / "u16mm"
-            // Android); every other key is byte-identical across platforms.
+            // as before. `format` is "f32m" or "u16mm"; Android can use
+            // either when the native raw-depth buffer was unavailable.
             public var depthFile: String?   // "depth_base.bin" / "depth_top.bin"
             public var rgbFile: String?     // "rgb_base.jpg" / "rgb_top.jpg"
+            public var confidenceFile: String?
             public var width: Int?
             public var height: Int?
             public var format: String?      // "f32m"
@@ -449,17 +464,19 @@ public struct RawCaptureManifest: Codable, Sendable {
                 case cameraPose = "camera_pose"
                 case depthFile = "depth_file"
                 case rgbFile = "rgb_file"
+                case confidenceFile = "confidence_file"
                 case width, height, format, fx, fy, cx, cy
             }
             public init(pitchDeg: Double, cameraPose: [Double],
                         depthFile: String? = nil, rgbFile: String? = nil,
                         width: Int? = nil, height: Int? = nil, format: String? = nil,
                         fx: Double? = nil, fy: Double? = nil,
-                        cx: Double? = nil, cy: Double? = nil) {
+                        cx: Double? = nil, cy: Double? = nil, confidenceFile: String? = nil) {
                 self.pitchDeg = pitchDeg; self.cameraPose = cameraPose
                 self.depthFile = depthFile; self.rgbFile = rgbFile
                 self.width = width; self.height = height; self.format = format
                 self.fx = fx; self.fy = fy; self.cx = cx; self.cy = cy
+                self.confidenceFile = confidenceFile
             }
         }
 
@@ -528,8 +545,20 @@ public enum RawCaptureError: Error, LocalizedError, Sendable {
 
 public enum RawCaptureStore {
 
+    #if DEBUG
+    /// Scoped to a synthetic test call; never a persisted app preference.
+    /// Release builds have no override and always use the user's container.
+    @TaskLocal static var testingRootDirectory: URL?
+    #endif
+
     /// Documents/raw-captures — the whole bundle tree.
     public static var rootDirectory: URL {
+        #if DEBUG
+        if let dir = testingRootDirectory {
+            try? FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+            return dir
+        }
+        #endif
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("raw-captures", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -621,25 +650,11 @@ public enum RawCaptureStore {
         public let inventory: Inventory
     }
 
-    /// A directory holding ONLY `pending_patch.json` is a leftover: operator
-    /// input was parked for a capture whose recorder then aborted, so nothing
-    /// will ever complete it. `savePendingPatch` no longer creates bundle
-    /// directories, so new ones can't appear — but a corpus recorded by an
-    /// earlier build can hold them, and left alone they are swept into the
-    /// export as empty bundles and counted as unreadable captures.
-    ///
-    /// They are only reaped past this grace window, so a bundle whose recorder
-    /// is still between `createDirectory` and its first payload write is never
-    /// touched (a bundle write finishes in seconds).
-    static let orphanReapGraceSeconds: TimeInterval = 300
-
     /// Every readable bundle (newest first, by manifest `created_at`) together
     /// with the count of bundle directories actually present.
     ///
-    /// READ-ONLY: sidecar-only leftovers are excluded from the count but NOT
-    /// deleted here, because this runs inside SwiftUI body evaluation (the
-    /// Settings summary) and a view body must not mutate the filesystem.
-    /// Deletion is `reapOrphanBundles()`, called at explicit refresh points.
+    /// READ-ONLY: every bundle directory counts, including incomplete writes
+    /// and pending operator input. An unreadable bundle is not absent data.
     public static func listing() -> Listing {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
@@ -655,9 +670,6 @@ public enum RawCaptureStore {
             else { continue }
             let mURL = dir.appendingPathComponent("manifest.json")
             let hasManifest = fm.fileExists(atPath: mURL.path)
-            // Only a manifest-less directory can be a sidecar leftover, so the
-            // full contents scan stays off the common path.
-            if !hasManifest, isSidecarOnly(dir: dir) { continue }
             directories += 1
             guard hasManifest,
                   let data = try? Data(contentsOf: mURL),
@@ -675,42 +687,12 @@ public enum RawCaptureStore {
     /// On-disk accounting on its own (Settings summary, console footer).
     public static func inventory() -> Inventory { listing().inventory }
 
-    /// True when the directory holds nothing but a pending sidecar and has sat
-    /// that way past the grace window — a bundle whose recorder aborted. A
-    /// directory still inside the window is treated as a live capture: it is
-    /// counted (so it can't disappear from the accounting) and never removed.
-    private static func isSidecarOnly(dir: URL) -> Bool {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return false }
-        let payload = names.filter { $0 != "pending_patch.json" && !$0.hasPrefix(".") }
-        guard payload.isEmpty, names.contains("pending_patch.json") else { return false }
-        let modified = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate ?? Date()
-        return Date().timeIntervalSince(modified) > orphanReapGraceSeconds
-    }
-
-    /// Delete sidecar-only leftovers so they aren't swept into an export as
-    /// empty bundles. Called where the operator explicitly refreshes the
-    /// raw-captures console and before an export — never from a view body.
-    /// Returns how many were removed.
+    /// Compatibility entry point. Automatic cleanup must never erase partial
+    /// field evidence or queued operator input. Explicit user deletion remains
+    /// separate; refresh/export are read-only with respect to source bundles.
     @discardableResult
     public static func reapOrphanBundles() -> Int {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: rootDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles])
-        else { return 0 }
-        var removed = 0
-        for dir in entries {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue,
-                  !fm.fileExists(atPath: dir.appendingPathComponent("manifest.json").path),
-                  isSidecarOnly(dir: dir)
-            else { continue }
-            if (try? fm.removeItem(at: dir)) != nil { removed += 1 }
-        }
-        return removed
+        0
     }
 
     public static func count() -> Int { list().count }
@@ -753,7 +735,7 @@ public enum RawCaptureStore {
     static func writeManifest(_ m: RawCaptureManifest, id: String) throws {
         do {
             let data = try encoder().encode(m)
-            try data.write(to: manifestURL(id: id), options: .atomic)
+            try RawOperatorEditJournal.atomic(data,to: manifestURL(id: id))
         } catch {
             throw RawCaptureError.writeFailed("manifest.json — \(error.localizedDescription)")
         }
@@ -764,7 +746,7 @@ public enum RawCaptureStore {
     /// Serialises "the recorder finishes the manifest" against "the operator
     /// enters a truth / taps Accept". A value entered while the bundle is
     /// still being written can no longer land in the gap between the two.
-    private static let patchLock = NSLock()
+    static let patchLock = NSRecursiveLock()
 
     /// Sidecar carrying operator input that arrived BEFORE the manifest
     /// existed. The recorder folds it in under the same lock, then deletes it.
@@ -785,58 +767,23 @@ public enum RawCaptureStore {
         }
     }
 
-    /// Caller must already hold `patchLock`.
-    private static func loadPendingPatch(id: String) -> PendingPatch? {
-        guard let data = try? Data(contentsOf: pendingPatchURL(id: id)) else { return nil }
-        return try? decoder().decode(PendingPatch.self, from: data)
-    }
-
-    /// Merge whatever is parked in the sidecar into `m` before it is written,
-    /// so no writer can clobber operator input it didn't know about.
-    /// Caller must already hold `patchLock`.
-    private static func absorbPendingPatch(into m: inout RawCaptureManifest, id: String) {
-        guard let patch = loadPendingPatch(id: id) else { return }
-        if let t = patch.truth, t.value != nil { m.truth = t }
-        if patch.operatorAccepted {
-            m.resultLive.operatorAccepted = true
-            m.resultLive.accepted = true
-        }
-    }
-
-    /// Caller must already hold `patchLock`.
-    ///
-    /// The bundle directory is NEVER created here. Creating it just to park a
-    /// sidecar for an id whose recorder had already aborted left an empty
-    /// zombie bundle that nothing reaps and the export sweeps up. The recorder
-    /// creates the directory as its FIRST action, so the only time this throws
-    /// is when the capture never started — which is exactly when the caller
-    /// must be told the value is not durable instead of being handed a
-    /// success it can clear the field on.
-    private static func savePendingPatch(_ p: PendingPatch, id: String) throws {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: bundleDirectory(id: id).path,
-                                             isDirectory: &isDir), isDir.boolValue
-        else { throw RawCaptureError.bundleMissing("capture bundle not on disk") }
-        let data = try encoder().encode(p)
-        try data.write(to: pendingPatchURL(id: id), options: .atomic)
-    }
-
-    /// Tear down a bundle whose write FAILED, and say whether operator input
-    /// died with it. The writer used to `removeItem(at: dir)` outright, which
-    /// destroyed a `pending_patch.json` the operator had already been told was
-    /// queued — the pairing vanished with nothing on screen to show for it.
-    /// Losing the pairing is acceptable; losing it INVISIBLY is not, so the
-    /// returned note is appended to the NOT SAVED reason the scan screen
-    /// renders verbatim.
-    ///
-    /// CROSS-PLATFORM: wording matched to the Android sibling.
-    static func discardFailedBundle(id: String) -> String {
+    /// Preserve every byte after a failed capture. A failure note is best
+    /// effort (storage itself may have failed); it never replaces a manifest.
+    /// The directory overload is for synthetic, isolated storage tests.
+    static func preserveFailedBundle(id: String,directory: URL? = nil) -> String {
         patchLock.lock()
         defer { patchLock.unlock() }
-        let patch = loadPendingPatch(id: id)
+        let dir = directory ?? bundleDirectory(id: id)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return "" }
+        let patch = (try? Data(contentsOf: dir.appendingPathComponent("pending_patch.json")))
+            .flatMap { try? decoder().decode(PendingPatch.self,from: $0) }
         let hadTruth = patch?.truth?.value != nil
-        try? FileManager.default.removeItem(at: bundleDirectory(id: id))
-        return hadTruth ? " · typed ground truth discarded — re-enter it" : ""
+        let note: [String: Any] = ["schema": 1,"measurement_id": id,"status": "partial_write_failed",
+                                 "created_at": ISO8601DateFormatter().string(from: Date())]
+        if let data = try? JSONSerialization.data(withJSONObject: note,options: [.sortedKeys]) {
+            try? data.write(to: dir.appendingPathComponent("write_failure.json"),options: .atomic)
+        }
+        return " · partial raw files retained"+(hadTruth ? " · typed ground truth not committed — keep input" : "")
     }
 
     /// What happened to a typed truth.
@@ -844,13 +791,14 @@ public enum RawCaptureStore {
     /// `applied` — the value IS in a manifest on disk. This is the only state
     ///   that may clear the operator's input.
     /// `pending` — the value is parked in the bundle's sidecar for the
-    ///   in-flight recorder to fold in. Accepted, but NOT yet durable: if that
-    ///   recorder then fails, the bundle is torn down and the sidecar with it.
+    ///   in-flight recorder to fold in. Not committed to a complete manifest;
+    ///   the sidecar is retained if the recorder fails.
     ///   `pending` used to report `isDurable`, so the field was cleared the
     ///   instant the value was merely QUEUED and a later write failure took
     ///   the hand measurement with it, silently. Callers keep the text and
     ///   show a queued state until the capture itself reports SAVED.
-    /// `failed`  — nothing was written. Keep the text and warn.
+    /// `failed` — completion was not confirmed. A durable sidecar may still
+    /// exist for recovery; keep the text and warn.
     public enum TruthOutcome: Sendable, Equatable {
         case applied
         case pending
@@ -872,33 +820,12 @@ public enum RawCaptureStore {
     public static func applyTruth(id: String,
                                   value: Double,
                                   unit: TruthInput.Unit) -> TruthOutcome {
-        patchLock.lock()
-        defer { patchLock.unlock() }
         let truth = RawCaptureManifest.Truth(value: value,
                                              enteredAt: Self.isoNow(),
                                              truthUnit: unit.rawValue)
-        if var m = loadManifest(id: id) {
-            // Carry over anything already parked (e.g. an Accept that beat the
-            // recorder) so writing the manifest can't drop it.
-            absorbPendingPatch(into: &m, id: id)
-            m.truth = truth
-            do {
-                try writeManifest(m, id: id)
-                try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
-                return .applied
-            } catch {
-                return .failed(error.localizedDescription)
-            }
-        }
-        // Manifest not on disk yet — park the value beside it.
         do {
-            var patch = loadPendingPatch(id: id) ?? PendingPatch()
-            patch.truth = truth
-            try savePendingPatch(patch, id: id)
-            return .pending
-        } catch {
-            return .failed(error.localizedDescription)
-        }
+            return try RawOperatorEditJournal.update(directory: bundleDirectory(id: id),id: id,truth: truth) ? .applied : .pending
+        } catch { return .failed(error.localizedDescription) }
     }
 
     /// Re-base a stored truth that was typed in imperial and stored as if it
@@ -925,6 +852,8 @@ public enum RawCaptureStore {
         patchLock.lock()
         defer { patchLock.unlock() }
         guard var m = loadManifest(id: id),
+              m.measurementId == nil, m.captureEvidence == nil,
+              !FileManager.default.fileExists(atPath: pendingPatchURL(id: id).path),
               m.truth.truthUnit == nil,
               let stored = m.truth.value,
               abs(stored - before) <= truthValueEpsilon
@@ -946,20 +875,10 @@ public enum RawCaptureStore {
     /// must never reach this (that is how a good truth got wiped).
     @discardableResult
     public static func clearTruth(id: String) -> TruthOutcome {
-        patchLock.lock()
-        defer { patchLock.unlock() }
-        if var patch = loadPendingPatch(id: id) {
-            patch.truth = nil
-            try? savePendingPatch(patch, id: id)
-        }
-        guard var m = loadManifest(id: id) else { return .failed("bundle not found") }
-        m.truth = RawCaptureManifest.Truth(value: nil, enteredAt: nil, truthUnit: nil)
         do {
-            try writeManifest(m, id: id)
-            return .applied
-        } catch {
-            return .failed(error.localizedDescription)
-        }
+            return try RawOperatorEditJournal.update(directory: bundleDirectory(id: id),id: id,
+                truth: .init(value: nil,enteredAt: nil)) ? .applied : .pending
+        } catch { return .failed(error.localizedDescription) }
     }
 
     /// The recorder's LAST write: folds in any operator input that landed
@@ -968,29 +887,7 @@ public enum RawCaptureStore {
     /// then commits, all under the patch lock. In either interleaving nothing
     /// the operator entered is lost.
     static func commitManifestFoldingTruth(_ m: RawCaptureManifest, id: String) throws {
-        patchLock.lock()
-        defer { patchLock.unlock() }
-        var manifest = m
-        // (a) operator input that patched the intermediate manifest on disk
-        if let onDisk = loadManifest(id: id) {
-            if manifest.truth.value == nil, onDisk.truth.value != nil {
-                manifest.truth = onDisk.truth
-            }
-            if onDisk.resultLive.operatorAccepted {
-                manifest.resultLive.operatorAccepted = true
-                manifest.resultLive.accepted = true
-            }
-        }
-        // (b) operator input parked before any manifest existed
-        if let patch = loadPendingPatch(id: id) {
-            if let t = patch.truth, t.value != nil { manifest.truth = t }
-            if patch.operatorAccepted {
-                manifest.resultLive.operatorAccepted = true
-                manifest.resultLive.accepted = true
-            }
-        }
-        try writeManifest(manifest, id: id)
-        try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
+        try RawOperatorEditJournal.commitRecorder(m,directory: bundleDirectory(id: id),id: id)
     }
 
     // (The old `updateTruth(id:value:)` is deliberately gone: passing nil
@@ -1005,28 +902,13 @@ public enum RawCaptureStore {
     /// the truth it survives being called before the writer has finished.
     @discardableResult
     public static func markAccepted(id: String) -> Bool {
-        patchLock.lock()
-        defer { patchLock.unlock() }
-        if var m = loadManifest(id: id) {
-            absorbPendingPatch(into: &m, id: id)
-            m.resultLive.operatorAccepted = true
-            m.resultLive.accepted = true        // legacy mirror (older readers)
-            do {
-                try writeManifest(m, id: id)
-                try? FileManager.default.removeItem(at: pendingPatchURL(id: id))
-                return true
-            } catch {
-                return false
-            }
-        }
-        var patch = loadPendingPatch(id: id) ?? PendingPatch()
-        patch.operatorAccepted = true
         do {
-            try savePendingPatch(patch, id: id)
-            return true
-        } catch {
-            return false
-        }
+            _ = try RawOperatorEditJournal.update(directory: bundleDirectory(id: id),id: id,accepted: true); return true
+        } catch { return false }
+    }
+
+    public static func recoverPendingOperatorEdits(root: URL? = nil) -> [RawOperatorRecoveryIssue] {
+        RawOperatorEditJournal.recover(root: root ?? rootDirectory)
     }
 
     // MARK: Export ZIP
@@ -1044,9 +926,8 @@ public enum RawCaptureStore {
     /// THROWING — an export that fails must say so, not return silently.
     public static func exportZIPStreaming() throws -> URL {
         let fm = FileManager.default
-        // Sidecar-only leftovers are not captures; keep them out of the corpus
-        // instead of shipping empty bundles to the analyst.
-        reapOrphanBundles()
+        // Export partial/unreadable bundles too; never clean source evidence
+        // as a side effect of exporting it.
         let rootPath = rootDirectory.path
         guard let en = fm.enumerator(at: rootDirectory, includingPropertiesForKeys: nil)
         else { throw RawCaptureError.bundleMissing("raw-captures folder unreadable") }
@@ -1179,9 +1060,11 @@ public enum RawCaptureFrame {
 
     /// Reconstruct a canonical frame from stored depth bytes + metadata.
     public static func reconstruct(from meta: RawCaptureManifest.DBHBundle.Frame,
-                                   depth: [Float]) -> ARDepthFrame {
-        var conf = [UInt8](repeating: 0, count: depth.count)
-        for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 }
+                                   depth: [Float], confidence: [UInt8]? = nil) -> ARDepthFrame {
+        var conf = confidence ?? [UInt8](repeating: 0, count: depth.count)
+        if confidence == nil && (meta.depthInputPolicy ?? DBHMeasurementDepth.legacy) == DBHMeasurementDepth.legacy {
+            for i in 0..<depth.count where validDepth(depth[i]) { conf[i] = 2 }
+        }
         let m = meta.viewToDepth
         let mapping: DepthViewMapping? = m.count == 6 && m.allSatisfy({ $0.isFinite })
             ? .init(a: m[0], b: m[1], tx: m[2], c: m[3], d: m[4], ty: m[5]) : nil
@@ -1194,7 +1077,8 @@ public enum RawCaptureFrame {
                                                     cx: meta.cx, cy: meta.cy),
             cameraPoseWorld: RawCaptureMatrix.pose(meta.cameraPose),
             timestamp: 0,
-            viewMapping: mapping)
+            viewMapping: mapping,
+            dbhDepthInputPolicy: meta.depthInputPolicy ?? DBHMeasurementDepth.legacy)
     }
 }
 

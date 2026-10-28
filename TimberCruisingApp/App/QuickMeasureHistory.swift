@@ -275,6 +275,17 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
     /// that claim's uncertainty. It is exported as its own column so that
     /// separation survives leaving the phone.
     public let timeSource: String?
+    /// Explicit attempt identity. Absence is legacy, never inferred from time
+    /// or value. Kept as text so malformed imported IDs cannot fall back to
+    /// the legacy matching/repair paths.
+    public private(set) var measurementId: String?
+    public var allowsLegacyInference: Bool { measurementId == nil }
+    public func identifyingMeasurement() throws -> QuickMeasureEntry {
+        guard measurementId == nil || measurementId.flatMap(UUID.init(uuidString:)) == id else {
+            throw FieldStudyError.invalid("reading measurement identity")
+        }
+        var next = self; next.measurementId = id.uuidString; return next
+    }
 
     public init(
         id: UUID = UUID(),
@@ -300,7 +311,8 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         truthSource: String? = nil,
         truthUnit: String? = nil,
         positionSource: String? = nil,
-        timeSource: String? = nil
+        timeSource: String? = nil,
+        measurementId: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -326,6 +338,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.truthUnit = truthUnit
         self.positionSource = positionSource
         self.timeSource = timeSource
+        self.measurementId = measurementId
     }
 
     // Custom decoding so entries written before any new field existed
@@ -358,6 +371,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
         self.positionSource = try c.decodeIfPresent(String.self,
                                                     forKey: .positionSource)
         self.timeSource    = try c.decodeIfPresent(String.self, forKey: .timeSource)
+        self.measurementId = try c.decodeIfPresent(String.self, forKey: .measurementId)
     }
 
     /// The vocabulary of `truthSource`. One case, because there is exactly one
@@ -469,7 +483,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource,
-            timeSource: TimeSource.typed.rawValue)
+            timeSource: TimeSource.typed.rawValue, measurementId: measurementId)
     }
 
     /// This reading with its coordinate replaced by one the cruiser TYPED,
@@ -496,7 +510,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: hasFix ? PositionSource.manual.rawValue : nil,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// How this reading's tree is labelled anywhere a tree is named — the
@@ -578,7 +592,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: "typed", truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// This reading re-stated with the value its OWN raw capture produces.
@@ -609,7 +623,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// This reading re-homed into another plot. Every other field is
@@ -635,7 +649,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// This reading with the two free-form details the quick-edit sheet owns
@@ -662,7 +676,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: truth,
             truthSource: truthSource, truthUnit: truthUnit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// This reading with its ground truth set (or cleared with nil).
@@ -696,7 +710,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             truthSource: newTruth == nil ? nil : source,
             truthUnit: newTruth == nil ? nil : unit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// This reading with its ground truth RE-BASED into the unit it was
@@ -723,7 +737,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             photoPath: photoPath, captureMode: captureMode, truth: newTruth,
             truthSource: truthSource, truthUnit: unit,
             positionSource: positionSource,
-            timeSource: timeSource)
+            timeSource: timeSource, measurementId: measurementId)
     }
 
     /// A brand-new reading the cruiser typed for a tree the sensors never
@@ -742,8 +756,9 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
                              plotID: UUID?,
                              speciesCode: String? = nil,
                              truth: Double? = nil) -> QuickMeasureEntry {
-        QuickMeasureEntry(
-            kind: kind, value: value,
+        let id = UUID()
+        return QuickMeasureEntry(
+            id: id,kind: kind, value: value,
             sigma: nil,
             // "yellow" is what the scan screens' own manual-entry path
             // stamps — a typed reading is usable but unverified.
@@ -752,7 +767,7 @@ public struct QuickMeasureEntry: Codable, Identifiable, Sendable, Equatable {
             treeNumber: treeNumber, treeName: treeName, plotID: plotID,
             speciesCode: speciesCode,
             position: kind == Kind.dbh ? StemPosition.dbh : nil,
-            captureMode: "typed", truth: truth)
+            captureMode: "typed", truth: truth,measurementId: id.uuidString)
     }
 }
 
@@ -786,7 +801,9 @@ public final class QuickMeasureHistory: ObservableObject {
     /// Same terms once more: absent decodes as nil, which `timeRecordedSource`
     /// reads as the device stamp it can only have been, because until the
     /// record sheet could set a time nothing but the clock ever wrote one.
-    public static let schemaVersion: Int = 7
+    /// 8 adds explicit measurementId. Legacy entries decode with nil; no IDs
+    /// or units are backfilled from timestamps or numerical similarity.
+    public static let schemaVersion: Int = 8
 
     @Published public private(set) var entries: [QuickMeasureEntry] = []
     /// All Quick Measure plots known to the app, newest first. Always
@@ -803,7 +820,10 @@ public final class QuickMeasureHistory: ObservableObject {
 
     private let defaults: UserDefaults
     private let capacity: Int
+    private static let captureWriteLock = NSRecursiveLock()
     private let sidecarURL: URL?
+    /// Read-only export source; never call repair/rewrite as part of a backup.
+    var fieldStudyJournalURL: URL? { sidecarURL }
 
     public init(defaults: UserDefaults = .standard,
                 capacity: Int = 500,
@@ -848,13 +868,62 @@ public final class QuickMeasureHistory: ObservableObject {
     public func append(_ entry: QuickMeasureEntry) {
         var next = entries
         next.insert(entry, at: 0)
-        if next.count > capacity {
-            next = Array(next.prefix(capacity))
-        }
         entries = next
         appendToSidecar(entry)
         persistCache()
         recomputeCapacityFlag()
+    }
+
+    /// Capture hosts use the throwing path so an accepted-save timestamp is
+    /// never stamped solely because an in-memory row was inserted.
+    public func captureReplacementSnapshots(_ entry: QuickMeasureEntry,replacing: Bool) throws -> [FieldQuickReplacementSnapshot] {
+        Self.captureWriteLock.lock(); defer { Self.captureWriteLock.unlock() }
+        guard replacing else { return [] }
+        let all = try durableCaptureBase()
+        return try replacementSnapshots(replacements(in: all,for: entry,replacing: replacing))
+    }
+    private func durableCaptureBase() throws -> [QuickMeasureEntry] {
+        guard let url = sidecarURL,FileManager.default.fileExists(atPath: url.path) else { return entries }
+        return Self.newestFirst(try FieldQuickResultProofReader.entries(url: url))
+    }
+    private func replacements(in all: [QuickMeasureEntry],for entry: QuickMeasureEntry,replacing: Bool) -> [QuickMeasureEntry] {
+        guard replacing,let tree = entry.treeNumber else { return [] }
+        let plot = entry.plotID ?? defaultPlotID()
+        return all.filter { $0.id != entry.id && $0.kind == entry.kind && $0.treeNumber == tree && ($0.plotID ?? defaultPlotID()) == plot }
+    }
+    private func replacementSnapshots(_ rows: [QuickMeasureEntry]) throws -> [FieldQuickReplacementSnapshot] {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys,.withoutEscapingSlashes]
+        return try rows.sorted { $0.id.uuidString < $1.id.uuidString }.map { row in
+            guard let kind = FieldStudyKind(rawValue: row.kind.rawValue),let json = String(data: try encoder.encode(row),encoding: .utf8) else { throw FieldStudyError.invalid("replacement native row") }
+            return try .init(result: .init(id: row.id.uuidString,store: "quick_history",kind: kind,value: row.value,measurementId: row.measurementId),payloadFormat: "ios.quick_entry_json.v1",payloadJSON: json)
+        }
+    }
+    @discardableResult public func saveCapturedReading(_ entry: QuickMeasureEntry, replacing: Bool = false,
+        expectedReplacements: [FieldQuickReplacementSnapshot]? = nil) throws -> [UUID] {
+        Self.captureWriteLock.lock(); defer { Self.captureWriteLock.unlock() }
+        let entry = try entry.identifyingMeasurement()
+        guard let url = sidecarURL else { throw FieldStudyError.missing("quick history journal") }
+        var next = try (replacing ? durableCaptureBase() : entries)
+        let superseded = replacements(in: next,for: entry,replacing: replacing)
+        if let expectedReplacements,try replacementSnapshots(superseded) != expectedReplacements {
+            throw FieldStudyError.conflict("Replacement rows changed before save")
+        }
+        if let old = next.first(where: { $0.id == entry.id }) {
+            guard old == entry else { throw FieldStudyError.conflict("Captured result UUID already exists") }
+            return []
+        }
+        let ids = Set(superseded.map(\.id)); next.removeAll { ids.contains($0.id) }; next.insert(entry,at: 0)
+        if replacing || !FileManager.default.fileExists(atPath: url.path) && !entries.isEmpty {
+            var data = Data("#v \(Self.schemaVersion)\n".utf8)
+            for value in next.reversed() { data.append(try JSONEncoder().encode(value)); data.append(10) }
+            try data.write(to: url,options: .atomic)
+            let handle = try FileHandle(forWritingTo: url); defer { try? handle.close() }; try handle.synchronize()
+        } else {
+            try DurableJSONLAppend.append(line: JSONEncoder().encode(entry),header: "#v \(Self.schemaVersion)\n",to: url)
+        }
+        entries = next; persistCache(); recomputeCapacityFlag()
+        // Superseded photos are historical evidence, not disposable cache.
+        return superseded.map(\.id)
     }
 
     /// Replace an existing entry in place, matched by id, and persist —
@@ -888,7 +957,7 @@ public final class QuickMeasureHistory: ObservableObject {
         var changed = 0
         var next = entries
         for (idx, e) in next.enumerated() {
-            guard let value = attachments[e.id], e.truth == nil else { continue }
+            guard e.allowsLegacyInference, let value = attachments[e.id], e.truth == nil else { continue }
             next[idx] = e.settingTruth(
                 value, source: QuickMeasureEntry.TruthSource.capture.rawValue)
             changed += 1
@@ -991,7 +1060,7 @@ public final class QuickMeasureHistory: ObservableObject {
         var changed = 0
         var next = entries
         for (idx, e) in next.enumerated() {
-            guard let r = repairs[e.id],
+            guard e.allowsLegacyInference, let r = repairs[e.id],
                   e.truthUnit == nil,
                   let stored = e.truth,
                   abs(stored - r.before) <= Self.truthValueEpsilon
@@ -1039,7 +1108,7 @@ public final class QuickMeasureHistory: ObservableObject {
         var changed = 0
         var next = entries
         for (idx, e) in next.enumerated() {
-            guard let r = repairs[e.id],
+            guard e.allowsLegacyInference, let r = repairs[e.id],
                   e.captureMode != "typed",
                   e.method != QuickMeasureEntry.typedMethodRaw(for: e.kind),
                   abs(e.value - r.expected) <= Self.repairValueEpsilon,
@@ -1082,15 +1151,11 @@ public final class QuickMeasureHistory: ObservableObject {
                 && $0.treeNumber == tree
                 && ($0.plotID ?? defaultPlotID()) == plot
         }
-        for old in superseded {
-            if let photo = old.photoPath { MeasurePhotoStore.delete(photo) }
-        }
         var next = entries.filter { e in !superseded.contains { $0.id == e.id } }
         if let idx = next.firstIndex(where: { $0.id == entry.id }) {
             next[idx] = entry
         } else {
             next.insert(entry, at: 0)
-            if next.count > capacity { next = Array(next.prefix(capacity)) }
         }
         entries = next
         rewriteSidecar()
@@ -1443,14 +1508,14 @@ public final class QuickMeasureHistory: ObservableObject {
     /// • Units are now explicit per-field columns (`value_unit`,
     ///   `sigma_unit`) so spreadsheet formulas can't accidentally mix
     ///   DBH millimetres with height metres.
-    public func exportCSV() -> URL? {
+    public func exportCSV(directory: URL? = nil) -> URL? {
         guard !entries.isEmpty else { return nil }
         let fm = FileManager.default
         guard let docs = try? fm.url(for: .documentDirectory,
                                      in: .userDomainMask,
                                      appropriateFor: nil,
                                      create: true) else { return nil }
-        let dir = docs.appendingPathComponent("Exports", isDirectory: true)
+        let dir = directory ?? docs.appendingPathComponent("Exports", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let iso = ISO8601DateFormatter()
@@ -1490,7 +1555,8 @@ public final class QuickMeasureHistory: ObservableObject {
                        "species", "position", "damage", "note",
                        "confidence", "method",
                        "latitude", "longitude", "photo", "capture_mode",
-                       "position_source", "truth_source", "time_source"]
+                       "position_source", "truth_source", "time_source", "measurement_id",
+                       "species_common_name", "species_scientific_name"]
         var out = headers.map(Self.csvField).joined(separator: ",")
         out += "\r\n"
 
@@ -1534,8 +1600,12 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.captureMode ?? "",
                 e.positionRecordedSource ?? "",
                 e.truthRecordedSource ?? "",
-                e.timeRecordedSource
+                e.timeRecordedSource,
+                e.measurementId ?? ""
             ]
+            let species = e.speciesCode.flatMap { SpeciesNameLookup.shared.record($0) }
+            cols.append(species?.commonName ?? "")
+            cols.append(species?.scientificName ?? "")
             let row = cols.map(Self.csvField).joined(separator: ",")
             out += row + "\r\n"
         }
@@ -1574,8 +1644,9 @@ public final class QuickMeasureHistory: ObservableObject {
     ///
     /// Returns the URL of the generated zip in Documents/Exports/,
     /// or nil if the log is empty / disk write failed.
-    public func exportBundle(logRule: LogRule = .scribner) -> URL? {
+    public func exportBundle(logRule: LogRule = .scribner, country: Country = .unitedStates, directory: URL? = nil) -> URL? {
         guard !entries.isEmpty else { return nil }
+        let includeBoardFeet = country != .international
 
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
@@ -1597,7 +1668,7 @@ public final class QuickMeasureHistory: ObservableObject {
         }
 
         // -- Trees.csv (plot × treeNumber, with first-found metadata) --
-        var trees = "plot_id,plot,tree_number,tree_name,species,damage,note\r\n"
+        var trees = "plot_id,plot,tree_number,tree_name,species,damage,note,species_common_name,species_scientific_name\r\n"
         let byPlotTree = Dictionary(grouping: entries) { e -> String in
             "\(e.plotID?.uuidString ?? "")|\(e.treeNumber ?? -1)"
         }
@@ -1616,7 +1687,9 @@ public final class QuickMeasureHistory: ObservableObject {
                 any.plotID?.uuidString ?? "",
                 plotName,
                 any.treeNumber.map(String.init) ?? "",
-                name, species, dmg, note
+                name, species, dmg, note,
+                SpeciesNameLookup.shared.record(species)?.commonName ?? "",
+                SpeciesNameLookup.shared.record(species)?.scientificName ?? ""
             ].map(Self.csvField).joined(separator: ",")
             trees += row + "\r\n"
         }
@@ -1628,7 +1701,7 @@ public final class QuickMeasureHistory: ObservableObject {
         // raw-capture manifest and matched to this stem. Blank when there is
         // no truth. time_source qualifies "timestamp" and is never blank —
         // "device" for the clock, "typed" for a time set by hand.
-        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source\r\n"
+        var stems = "id,plot_id,tree_number,timestamp,dbh_cm,truth_cm,sigma_mm,position,confidence,method,capture_mode,truth_source,time_source,measurement_id\r\n"
         for e in entries where e.kind == .dbh {
             // Spelled out rather than inlined: adding the truth column tipped
             // this literal past what the type-checker will solve in one go.
@@ -1646,14 +1719,14 @@ public final class QuickMeasureHistory: ObservableObject {
                 e.confidenceRaw, e.method,
                 e.captureMode ?? "",
                 e.truthRecordedSource ?? "",
-                e.timeRecordedSource
+                e.timeRecordedSource,e.measurementId ?? ""
             ]
             stems += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }
 
         // -- Heights.csv (one per Height measurement) --
         // "truth_source" then "time_source" appended LAST — see Stems.csv.
-        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source\r\n"
+        var heights = "id,plot_id,tree_number,timestamp,height_m,truth_m,sigma_m,confidence,method,truth_source,time_source,measurement_id\r\n"
         for e in entries where e.kind == .height {
             let truth: String = e.truth.map { String(format: "%.3f", $0) } ?? ""
             let sigma: String = e.sigma.map { String(format: "%.3f", $0) } ?? ""
@@ -1667,7 +1740,7 @@ public final class QuickMeasureHistory: ObservableObject {
                 sigma,
                 e.confidenceRaw, e.method,
                 e.truthRecordedSource ?? "",
-                e.timeRecordedSource
+                e.timeRecordedSource,e.measurementId ?? ""
             ]
             heights += row.map(Self.csvField).joined(separator: ",") + "\r\n"
         }
@@ -1699,7 +1772,7 @@ public final class QuickMeasureHistory: ObservableObject {
                 ? "" : String(format: "%.2f",
                               heightsM.reduce(0, +) / Double(heightsM.count))
             var bfTotal: Double = 0
-            for (dbh, hOpt) in dbhTrees {
+            for (dbh, hOpt) in dbhTrees where includeBoardFeet {
                 guard let h = hOpt,
                       let bf = VolumeConversion.boardFeet(
                           dbhCm: dbh, totalHeightM: h, rule: logRule)
@@ -1718,7 +1791,7 @@ public final class QuickMeasureHistory: ObservableObject {
                 meanH,
                 bfTotal > 0 ? String(format: "%.0f", bfTotal) : "",
                 bfPerAcre,
-                logRule.rawValue
+                includeBoardFeet ? logRule.rawValue : ""
             ].map(Self.csvField).joined(separator: ",")
             calcs += row + "\r\n"
         }
@@ -1743,7 +1816,7 @@ public final class QuickMeasureHistory: ObservableObject {
                                      in: .userDomainMask,
                                      appropriateFor: nil, create: true)
         else { return nil }
-        let dir = docs.appendingPathComponent("Exports", isDirectory: true)
+        let dir = directory ?? docs.appendingPathComponent("Exports", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = iso.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -1804,40 +1877,30 @@ public final class QuickMeasureHistory: ObservableObject {
 
     private func appendToSidecar(_ entry: QuickMeasureEntry) {
         guard let url = sidecarURL else { return }
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: url.path) {
-            // First write establishes the header line.
-            let header = "#v \(Self.schemaVersion)\n"
-            try? header.data(using: .utf8)?.write(to: url)
-        }
-        guard let data = try? JSONEncoder().encode(entry),
-              let line = (String(data: data, encoding: .utf8) ?? "") + "\n" as String?
-        else { return }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: Data(line.utf8))
+        try? DurableJSONLAppend.append(line: JSONEncoder().encode(entry),header: "#v \(Self.schemaVersion)\n",to: url)
     }
 
-    /// Full rewrite — used after delete / clearAll. Cheap at our sizes
-    /// (< 500 entries × ~160 bytes = 80 kB).
+    /// Full rewrite after explicit edits/deletions; never evict by count.
     private func rewriteSidecar() {
         guard let url = sidecarURL else { return }
-        var out = "#v \(Self.schemaVersion)\n"
-        for e in entries.reversed() {   // oldest-first on disk for debugging
-            guard let data = try? JSONEncoder().encode(e),
-                  let line = String(data: data, encoding: .utf8)
-            else { continue }
-            out += line + "\n"
+        do {
+            var data = Data("#v \(Self.schemaVersion)\n".utf8)
+            for e in entries.reversed() { data.append(try JSONEncoder().encode(e)); data.append(10) }
+            try data.write(to: url,options: .atomic)
+            let handle = try FileHandle(forWritingTo: url); defer { try? handle.close() }; try handle.synchronize()
+        } catch {
+            // Leave the original intact. Never skip an unencodable row or
+            // truncate a live file to manufacture a partial successful rewrite.
         }
-        try? out.data(using: .utf8)?.write(to: url)
     }
 
     // MARK: Cache (UserDefaults)
 
     private func persistCache() {
         do {
-            let data = try JSONEncoder().encode(entries)
+            // Bound the fallback cache only. The complete original journal is
+            // authoritative and is never trimmed to this advisory threshold.
+            let data = try JSONEncoder().encode(Array(entries.prefix(capacity)))
             defaults.set(data, forKey: Keys.entries)
         } catch {
             // Non-fatal — the JSONL sidecar is the durable store.
@@ -1846,8 +1909,8 @@ public final class QuickMeasureHistory: ObservableObject {
 
     // MARK: Loading
 
-    /// Tries the UserDefaults cache first (fast path). If missing or
-    /// unreadable, replays the JSONL sidecar. Last resort: empty log.
+    /// A fully valid journal wins over the bounded fallback cache. A process
+    /// may have stopped after a journal write but before its cache update.
     ///
     /// SORTED on the way in, whichever source answered. The whole app reads
     /// `entries` as newest-first, and the sidecar is an APPEND log: a reading
@@ -1857,6 +1920,11 @@ public final class QuickMeasureHistory: ObservableObject {
     /// sharing an instant keep the order the log recorded them in.
     private static func loadBest(defaults: UserDefaults,
                                   sidecar: URL?) -> [QuickMeasureEntry] {
+        // A process can die after a durable append but before its cache write.
+        // Only a fully decoded original journal may outrank the fallback cache;
+        // never silently skip malformed lines and call that a complete replay.
+        if let sidecar,FileManager.default.fileExists(atPath: sidecar.path),
+           let durable = try? FieldQuickResultProofReader.entries(url: sidecar) { return newestFirst(durable) }
         if let data = defaults.data(forKey: Keys.entries),
            let decoded = try? JSONDecoder().decode(
                 [QuickMeasureEntry].self, from: data) {

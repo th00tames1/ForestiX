@@ -56,14 +56,16 @@ public enum TruthBackfill {
         /// happens anywhere on this path.
         public let value: Double
         public let createdAt: Date
+        public let measurementId: String?
 
         public init(captureID: String, kind: QuickMeasureEntry.Kind,
-                    treeNumber: Int, value: Double, createdAt: Date) {
+                    treeNumber: Int, value: Double, createdAt: Date, measurementId: String? = nil) {
             self.captureID = captureID
             self.kind = kind
             self.treeNumber = treeNumber
             self.value = value
             self.createdAt = createdAt
+            self.measurementId = measurementId
         }
     }
 
@@ -116,6 +118,7 @@ public enum TruthBackfill {
     public static func recoverable(from summaries: [RawCaptureSummary]) -> [ManifestTruth] {
         summaries.compactMap { s -> ManifestTruth? in
             guard s.manifest.context.mode != "cruise" else { return nil }
+            guard s.manifest.measurementId == nil, s.manifest.captureEvidence == nil else { return nil }
             guard let value = s.manifest.truth.value, value.isFinite, value > 0
             else { return nil }                       // no truth typed here
             guard let tree = s.manifest.context.treeNumber else { return nil }
@@ -173,14 +176,15 @@ public enum TruthBackfill {
     ///
     /// IDEMPOTENT: everything it attaches makes its reading ineligible (rule 3),
     /// so a second run over the same corpus plans zero attachments.
-    public static func plan(manifests: [ManifestTruth],
+    public static func plan(manifests source: [ManifestTruth],
                             entries: [QuickMeasureEntry],
                             defaultPlotID: UUID?,
                             scanned: Int) -> Plan {
-        // Readings of a recoverable kind that belong to a tree, grouped.
+        let manifests = source.filter { $0.measurementId == nil }
+        // UUID-scoped records never enter the legacy nearest-time join.
         var groups: [GroupKey: [QuickMeasureEntry]] = [:]
         for e in entries {
-            guard e.kind == .dbh || e.kind == .height, let tree = e.treeNumber
+            guard e.allowsLegacyInference, e.kind == .dbh || e.kind == .height, let tree = e.treeNumber
             else { continue }
             groups[GroupKey(kind: e.kind, tree: tree), default: []].append(e)
         }

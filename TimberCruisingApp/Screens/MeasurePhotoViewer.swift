@@ -91,8 +91,7 @@ extension MeasurePhotoPage {
     private static func page(for entry: QuickMeasureEntry,
                              unitSystem: UnitSystem) -> MeasurePhotoPage? {
         guard let photoPath = entry.photoPath else { return nil }
-        let descriptor = ConfidenceStyle.descriptor(for: entry.confidenceRaw)
-        let detail = [sigmaText(entry, unitSystem), descriptor.label]
+        let detail = [sigmaText(entry, unitSystem)]
             .compactMap { $0 }.joined(separator: " · ")
         let cells = [
             MeasurePhotoMetaCell(label: "TREE", value: treeText(entry)),

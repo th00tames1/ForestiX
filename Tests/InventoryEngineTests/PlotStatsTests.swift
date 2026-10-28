@@ -72,6 +72,15 @@ final class PlotStatsTests: XCTestCase {
 
     // MARK: - Empty
 
+    func testRegisteredSpeciesWithoutEquationStillRetainsTreeAndDiameterStats() throws {
+        let s = try SpeciesRegistration.make(commonName: "Synthetic international species", scientificName: "", existing: []).unconfigured
+        let r = PlotStatsCalculator.compute(plot: makePlot(plotAreaAcres: 0.1), cruiseDesign: fixedDesign(),
+            trees: [tree(species: s.code)], species: [s.code: s], volumeEquations: [:])
+        XCTAssertEqual(r.liveTreeCount, 1); XCTAssertEqual(r.qmdCm, 30, accuracy: 0.001)
+        XCTAssertEqual(r.tpa, 10, accuracy: 0.001); XCTAssertGreaterThan(r.baPerAcreM2, 0)
+        XCTAssertTrue(r.grossVolumePerAcreM3.isNaN); XCTAssertTrue(r.merchVolumePerAcreM3.isNaN)
+    }
+
     func testMissingEquationDoesNotBecomeZeroOrPartialVolume() {
         let r = PlotStatsCalculator.compute(
             plot: makePlot(plotAreaAcres: 0.1), cruiseDesign: fixedDesign(),

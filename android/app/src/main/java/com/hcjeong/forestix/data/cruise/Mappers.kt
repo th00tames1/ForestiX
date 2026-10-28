@@ -281,6 +281,7 @@ object TreeMapper {
         dbhConfidence = s.dbhConfidence.raw,
         dbhCaptureMode = s.dbhCaptureMode,
         dbhEstimatorEpoch = s.dbhEstimatorEpoch,
+        dbhMeasurementId=s.dbhMeasurementId,heightMeasurementId=s.heightMeasurementId,
         dbhIsIrregular = s.dbhIsIrregular,
 
         heightM = s.heightM,
@@ -345,6 +346,7 @@ object TreeMapper {
             dbhConfidence = dbhConf,
             dbhCaptureMode = e.dbhCaptureMode,
             dbhEstimatorEpoch = e.dbhEstimatorEpoch,
+            dbhMeasurementId=e.dbhMeasurementId,heightMeasurementId=e.heightMeasurementId,
             dbhIsIrregular = e.dbhIsIrregular,
             heightM = e.heightM,
             heightMethod = heightMethod,

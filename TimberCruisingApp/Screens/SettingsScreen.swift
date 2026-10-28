@@ -70,13 +70,19 @@ public struct SettingsScreen: View {
     public var body: some View {
         Form {
             regionAndUnitsSection
+            Section { NavigationLink("Species") { SpeciesSettingsScreen(catalog: environment.speciesCatalog) } }
             displaySection
             measuringSection
-            calibrationSection
             dataBackupSection
             // Basemap tiles is ordinary field setup, not developer tooling —
             // it sits ABOVE the developer group (Android matches).
             advancedSection
+            Section("Tools") {
+                NavigationLink("Field study") {
+                    FieldStudySettingsScreen(store: environment.fieldStudy)
+                }
+                NavigationLink("Reference & formulas") { ReferenceLibraryScreen() }
+            }
             if settings.developerMode { developerSection }
             clearDeveloperDataSection
             dangerZoneSection
@@ -217,10 +223,7 @@ public struct SettingsScreen: View {
     // dependency-ordered group: the country drives units, species and the
     // volume standard; Units and the US-only Log rule are overrides below it.
     private var regionAndUnitsSection: some View {
-        Section(
-            header: Text("Region & units"),
-            footer: Text("Sets your units, species list, and volume standard. The US uses board-foot log rules; elsewhere is cubic metres.")
-        ) {
+        Section(header: Text("Region & units")) {
             Picker("Country",
                    selection: Binding(
                     get: { settings.country },
@@ -291,9 +294,6 @@ public struct SettingsScreen: View {
                     }
                 }
                 .accessibilityIdentifier("settings.logRule")
-                Text("Scribner (West), Doyle (East), or International ¼″ (most accurate).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -319,14 +319,11 @@ public struct SettingsScreen: View {
                 set: { settings.breastHeightGuideHeight = $0 })
             ) {
                 ForEach(BreastHeightGuideHeight.allCases, id: \.self) { height in
-                    Text(height.metricLabel).tag(height)
+                    Text(height.label(imperial: settings.unitSystem == .imperial)).tag(height)
                 }
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("settings.breastHeightGuideHeight")
-            Text("Vertical height above the selected point.")
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textSecondary)
         }
     }
 
@@ -335,10 +332,7 @@ public struct SettingsScreen: View {
     // default. Cruisers who only want diameters turn it off here. Strings
     // and the stored key are identical on Android.
     private var measuringSection: some View {
-        Section(
-            header: Text("Measuring"),
-            footer: Text("After you accept a diameter in cruise, Height opens for the same tree. Skip returns to the tally.")
-        ) {
+        Section(header: Text("Measuring")) {
             Toggle("Measure height after diameter",
                    isOn: Binding(
                     get: { settings.measureHeightAfterDiameter },
@@ -347,28 +341,11 @@ public struct SettingsScreen: View {
         }
     }
 
-    // MARK: - 3. Calibration
-    private var calibrationSection: some View {
-        Section(
-            header: Text("Calibration"),
-            footer: Text("Scan a flat wall, then a round post you have " +
-                         "measured. This tells Forestix how far off your " +
-                         "phone's depth sensor runs, so diameters come out " +
-                         "right. Do both before your first cruise.")
-        ) {
-            NavigationLink("Run Calibration") { CalibrationScreen() }
-                .accessibilityIdentifier("settings.calibrationLink")
-        }
-    }
-
     // MARK: - 4. Data & backup
     // The existing backup/restore surface, relocated here. Per-project exports
     // (PDF/CSV/GeoJSON) live on each project's screen.
     private var dataBackupSection: some View {
-        Section(
-            header: Text("Data & backup"),
-            footer: Text("Saves every project, photo, and scan to a .tcproj file you can restore on any device. Per-project exports (PDF, CSV, GeoJSON) live on each project's screen.")
-        ) {
+        Section("Data & backup") {
             Button {
                 backup.backupAllProjects()
             } label: {
@@ -443,19 +420,6 @@ public struct SettingsScreen: View {
                 // the mask has holes mid-stem and bleeds into the background.
                 // An experiment does not belong on a cruiser's settings
                 // screen. The scan gate reads BOTH keys.
-                Toggle(isOn: Binding(
-                    get: { settings.dbhAutoSegmentation },
-                    set: { settings.dbhAutoSegmentation = $0 })
-                ) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Automatic stem edges (experimental)")
-                        Text("NOT A MEASUREMENT YET. Finds the trunk in the camera image and places the bracket on its edges; take hold of the bracket and it stands aside. Falls back to the depth edge-finder whenever it has no answer. Readings taken this way are recorded as \"segmented\".")
-                            .font(ForestixType.caption)
-                            .foregroundStyle(ForestixPalette.textSecondary)
-                    }
-                }
-                .accessibilityIdentifier("settings.dbhAutoSegmentation")
-
                 // DBH algorithm — developer-only; normal users get the single
                 // blessed DBH path. Moved in from its former standalone section.
                 Picker("DBH algorithm",

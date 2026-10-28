@@ -105,6 +105,10 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.hcjeong.forestix.AppEnvironment
+import com.hcjeong.forestix.data.fieldstudy.FieldResultTargetBinding
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.basemap.MapCameraState
@@ -193,6 +197,7 @@ internal data class CruiseData(
     val plots: List<Plot>,
     val treesByPlot: Map<UUID, List<Tree>>,
     val plannedPlots: List<PlannedPlot> = emptyList(),
+    val reservedTreeMaximum:Map<UUID,Int> = emptyMap(),
 ) {
     val trees: List<Tree> get() = treesByPlot.values.flatten()
 }
@@ -240,6 +245,8 @@ internal class CruiseModeState {
     /// neither of the two above names a cruise that never got as far as a
     /// plot or a plan.
     var cruiseSetupRefusal by mutableStateOf<String?>(null)
+    var heightTargetFailure by mutableStateOf<String?>(null)
+    var heightTargetBusy by mutableStateOf(false)
     /// A "Start plot now" write is in flight. The storage write is a
     /// coroutine and the peek stays on screen until it lands, so without
     /// this a second tap inside that window runs the conversion twice: two
@@ -398,11 +405,12 @@ internal fun CruiseModeEffects(
     LaunchedEffect(state.refresh, settings.cruiseProjectId) {
         val project = resolveCurrentProject(env, settings.cruiseProjectId)
         val plots = project?.let { env.plotRepository.listByProject(it.id) } ?: emptyList()
-        val trees = plots.associate { it.id to env.treeRepository.listByPlot(it.id) }
+        val allTrees = plots.associate { it.id to env.treeRepository.listByPlot(it.id,true) }
+        val trees = allTrees.mapValues{(_,rows)->rows.filter{it.deletedAt==null}}
         val planned = project?.let { p ->
             env.plannedPlotRepository.listByProject(p.id).filter { !it.visited }
         } ?: emptyList()
-        state.data = CruiseData(project, plots, trees, planned)
+        state.data = CruiseData(project, plots, trees, planned,allTrees.mapValues{(_,rows)->rows.maxOfOrNull{it.treeNumber}?:0})
         // Stale active-plot guard (deleted / closed / other project).
         val active = settings.cruisePlotId?.let(::uuidOrNull)
         if (active != null && plots.none { it.id == active && it.closedAt == null }) {
@@ -514,8 +522,8 @@ internal fun CruiseModeEffects(
             if (settings.cruisePlotId != plot.id.toString()) {
                 env.settings.setCruisePlotId(plot.id.toString())
             }
-            val next = (state.data.treesByPlot[plot.id].orEmpty()
-                .maxOfOrNull { it.treeNumber } ?: 0) + 1
+            val maximum=state.data.reservedTreeMaximum[plot.id]?:0
+            val next=if(maximum<Int.MAX_VALUE)maximum+1 else Int.MAX_VALUE
             // Picked up from the plot the loop is entering, not carried over
             // from whatever was tallied last: re-entering Plot 2 after naming
             // trees in Plot 1 must continue PLOT 2's series. Null when this
@@ -791,13 +799,28 @@ internal fun CruiseModeEffects(
     /// accepted reading folds into that row, the screen pops back here,
     /// and the map's re-entry runs CruiseCapture.end() as always.
     state.measureHeight = measureHeight@{ tree ->
+        if(state.heightTargetBusy)return@measureHeight
         val p = state.project ?: return@measureHeight
         val plot = state.data.plots.firstOrNull { it.id == tree.plotId }
             ?: return@measureHeight
-        CruiseCapture.beginHeight(env, p, plot, tree)
-        // Close the peek under the pushed screen (iOS startScopedHeight).
-        state.selectedId = null
-        nav.navigate("height?tree=${tree.treeNumber}")
+        state.heightTargetBusy=true
+        val origin=nav.currentBackStackEntry
+        scope.launch{
+            try{
+                env.fieldStudy.awaitPendingWrites();kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if(nav.currentBackStackEntry!=origin)return@launch
+                val study=env.fieldStudy.state.value
+                val target=if(study.configuration.enabled){
+                    if(!study.loaded||study.error!=null)throw FieldStudyException("missing","Field-study archive unavailable")
+                    FieldResultTargetBinding.resolve(listOf(tree.id.toString()),"cruise",study.configuration.studyId,study.measurements,study.activeTargets)
+                }else null
+                CruiseCapture.beginHeight(env,p,plot,tree,target)
+                state.selectedId=null
+                nav.navigate("height?tree=${tree.treeNumber}")
+            }catch(e:CancellationException){throw e}
+            catch(e:Exception){state.heightTargetFailure=e.message?:"Measurement target unavailable"}
+            finally{state.heightTargetBusy=false}
+        }
     }
 }
 
@@ -809,7 +832,7 @@ internal fun cruiseModeMarkers(
     colors: ForestixColors,
 ): List<MapMarker> = cruiseMarkers(
     state.data, state.activePlot(settings), state.selectedId, colors.accent,
-    colors.confidenceOk, colors.confidenceWarn, colors.primary,
+    colors.confidenceOk, colors.primary,
     colors.textTertiary)
 
 // The active plot's boundary is no longer a plain polygon ring: it is the
@@ -1019,6 +1042,7 @@ internal fun CruiseModeBottomContent(
                 project = state.project,
                 trees = state.data.treesByPlot[peekPlot.id].orEmpty(),
                 allProjectTrees = state.data.trees,
+                reservedMaximum = state.data.reservedTreeMaximum[peekPlot.id]?:0,
                 modifier = Modifier
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 20.dp),
@@ -1454,6 +1478,9 @@ internal fun CruiseModeSheets(
 
     // A plan has no centre, so it gets its own refusal rather than borrowing
     // the one titled "Can't save the plot centre".
+    state.heightTargetFailure?.let{message->AlertDialog(onDismissRequest={state.heightTargetFailure=null},
+        title={Text("Measurement target unavailable")},text={Text(message)},
+        confirmButton={TextButton(onClick={state.heightTargetFailure=null}){Text("OK")}})}
     val planRefusal = state.planSaveRefusal
     if (planRefusal != null) {
         AlertDialog(
@@ -1585,8 +1612,6 @@ internal suspend fun createDefaultProject(
     return env.projectRepository.create(project)
 }
 
-private fun isWarn(raw: String?) = raw == "yellow" || raw == "red"
-
 /// Plot RING pins (status colour: amber in-progress / green closed /
 /// HOLLOW DASHED tertiary = planned) + cruise tree teardrop pins.
 private fun cruiseMarkers(
@@ -1595,7 +1620,6 @@ private fun cruiseMarkers(
     selectedId: String?,
     accent: Color,
     ok: Color,
-    warn: Color,
     primary: Color,
     plannedTint: Color,
 ): List<MapMarker> {
@@ -1644,11 +1668,7 @@ private fun cruiseMarkers(
             // Named trees read by their name here too (shortened to what
             // the drop holds) — the peek prints it in full.
             title = TreeLabel.pinTitle(tree.treeName, tree.treeNumber),
-            tint = if (isWarn(tree.dbhConfidence.raw) || isWarn(tree.heightConfidence?.raw)) {
-                warn
-            } else {
-                primary
-            },
+            tint = primary,
             id = id,
             shape = MapMarkerShape.PIN,
             selected = id == selectedId,
@@ -2099,10 +2119,10 @@ private fun ProjectStrip(
 ) {
     val colors = Forestix.colors
     val type = Forestix.type
-    val text = if (activePlot != null) {
-        "$projectName · Plot ${activePlot.plotNumber} · $treeCount trees"
+    val context = if (activePlot != null) {
+        "Plot ${activePlot.plotNumber} · $treeCount trees"
     } else {
-        "$projectName · No active plot"
+        "No active plot"
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -2110,11 +2130,11 @@ private fun ProjectStrip(
         modifier = Modifier
             .padding(bottom = 12.dp)
             .wrapContentWidth(unbounded = true)
-            .softDropShadow(Color.Black.copy(alpha = 0.18f), 10.dp, 2.dp, cornerRadius = 999.dp)
+            .softDropShadow(Color.Black.copy(alpha = 0.18f), 10.dp, 2.dp, cornerRadius = 16.dp)
             .pressableNoRipple(onClick = onClick)
-            .clip(RoundedCornerShape(999.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(Color(0xCC06090A))
-            .padding(horizontal = 13.dp, vertical = 7.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         // Status dot: accent while a plot is active, dim otherwise.
         Box(
@@ -2123,17 +2143,12 @@ private fun ProjectStrip(
                 .clip(CircleShape)
                 .background(if (activePlot != null) colors.accent else colors.textTertiary),
         )
-        Text(
-            text,
-            style = type.dataSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-            color = Color(0xFFF2F5F3),
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            // Long project names truncate instead of stretching the pill
-            // across the whole screen; still layout-neutral (unbounded).
-            modifier = Modifier.widthIn(max = 260.dp),
-        )
+        Column(Modifier.widthIn(max = 260.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(projectName, style = type.bodyBold.copy(fontSize = 16.sp),
+                color = Color(0xFFF2F5F3), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(context, style = type.caption.copy(fontSize = 12.sp),
+                color = Color(0xFFF2F5F3), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -2146,6 +2161,7 @@ private fun PlotPeekCard(
     project: Project?,
     trees: List<Tree>,
     allProjectTrees: List<Tree>,
+    reservedMaximum:Int,
     modifier: Modifier = Modifier,
     onAddTree: () -> Unit,
     onHeights: () -> Unit,
@@ -2176,7 +2192,8 @@ private fun PlotPeekCard(
     LaunchedEffect(plot.id, trees.size) {
         stats = computePlotStats(env, project, plot, trees, allProjectTrees)
     }
-    val nextTree = (trees.maxOfOrNull { it.treeNumber } ?: 0) + 1
+    val maximum=maxOf(reservedMaximum,trees.maxOfOrNull { it.treeNumber } ?: 0)
+    val nextTree = if(maximum<Int.MAX_VALUE)maximum+1 else Int.MAX_VALUE
     // What the tree this button is about to open the tally on will be called:
     // the auto-incremented name when this plot has a series running, else
     // "Tree #<next>". Read straight off the peek's own tree list rather than
@@ -2980,7 +2997,6 @@ private fun TreeMetricRow(
         }
         // Tapping the grade opens the same explainer the tree report and
         // the quick peek open, scoped to this row's measurement.
-        if (tierRaw != null) TierChipSoft(tierRaw, explains = explains)
     }
 }
 
@@ -3012,13 +3028,6 @@ private fun DetailChip(label: String, value: String) {
 
 // MARK: - Project sheet (mock ⑤) -------------------------------------------------
 
-private data class ProjectRowInfo(
-    val project: Project,
-    val plotCount: Int,
-    val closedPlots: Int,
-    val treeCount: Int,
-)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProjectSheet(
@@ -3038,23 +3047,8 @@ private fun ProjectSheet(
     val type = Forestix.type
     val scope = rememberCoroutineScope()
 
-    var rows by remember { mutableStateOf<List<ProjectRowInfo>>(emptyList()) }
     var newProjectOpen by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) {
-        rows = env.projectRepository.list().map { p ->
-            val plots = env.plotRepository.listByProject(p.id)
-            var treeCount = 0
-            for (plot in plots) treeCount += env.treeRepository.listByPlot(plot.id).size
-            ProjectRowInfo(
-                project = p,
-                plotCount = plots.size,
-                closedPlots = plots.count { it.closedAt != null },
-                treeCount = treeCount,
-            )
-        }
-    }
-
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
             Modifier
@@ -3069,46 +3063,6 @@ private fun ProjectSheet(
                 color = colors.textTertiary,
                 modifier = Modifier.padding(bottom = ForestixSpace.xs),
             )
-
-            // Switcher rows (mock `.prow`).
-            rows.forEach { info ->
-                val isCurrent = info.project.id == currentProject?.id
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .clickableNoRipple {
-                            if (!isCurrent) onSwitch(info.project.id.toString())
-                        }
-                        .padding(vertical = 12.dp, horizontal = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(ForestixSpace.sm),
-                ) {
-                    RadioDot(on = isCurrent)
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            info.project.name,
-                            style = type.bodyBold,
-                            color = colors.textPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            "Plots ${info.closedPlots}/${info.plotCount} · " +
-                                "Trees ${info.treeCount} · " +
-                                SimpleDateFormat("d MMM", Locale.US)
-                                    .format(Date(info.project.createdAt)),
-                            style = type.dataSmall.copy(fontSize = 10.5.sp),
-                            color = colors.textTertiary,
-                            modifier = Modifier.padding(top = 2.dp),
-                        )
-                    }
-                    if (isCurrent) {
-                        StatusChipSoft("Current", colors.accent)
-                    }
-                }
-                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
-            }
 
             // "New project" — name ONCE, everything else auto (Plot 1, 2… /
             // tree numbers). Units follow app settings.
@@ -3215,11 +3169,7 @@ private fun ProjectSheet(
                 trailingChip = "Advanced",
             ) { if (projectId != null) onCruiseSetup() }
 
-            // FIELD REPORT 5 — read back THIS plot's trees without leaving
-            // the project. Only offered when a plot is actually open: with no
-            // plot in hand there is nothing to scope to, and the footer's
-            // plain "Field log" already shows everything. The subtitle names
-            // the plot so the row cannot be mistaken for that unscoped link.
+            // One field-log entry, scoped to the active plot if present.
             if (activePlot != null) {
                 HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
                 SheetChoiceRow(
@@ -3227,6 +3177,11 @@ private fun ProjectSheet(
                     "Field log",
                     FieldLogWords.plotName(activePlot.plotNumber),
                 ) { onNavigate(Routes.fieldLogPlot(activePlot.id.toString())) }
+            } else {
+                HorizontalDivider(color = colors.divider, thickness = 0.5.dp)
+                SheetChoiceRow(Icons.AutoMirrored.Filled.ListAlt, "Field log", "") {
+                    onNavigate(Routes.FIELD_LOG)
+                }
             }
 
             // Export collapse (mock ⑤ `.sheetcol`): one primary "Export
@@ -3251,10 +3206,6 @@ private fun ProjectSheet(
                     .padding(top = ForestixSpace.sm),
                 horizontalArrangement = Arrangement.spacedBy(ForestixSpace.xs),
             ) {
-                ToolButton("Field log", Modifier.weight(1f)) { onNavigate(Routes.FIELD_LOG) }
-                ToolButton("Reference", Modifier.weight(1f)) {
-                    onNavigate(Routes.REFERENCE_LIBRARY)
-                }
                 ToolButton("Settings", Modifier.weight(1f)) { onNavigate(Routes.SETTINGS) }
             }
         }

@@ -180,7 +180,8 @@ extension MapHomeScreen {
     }
 
     func nextTreeNumber(in plotID: UUID) -> Int {
-        (liveTrees(in: plotID).map(\.treeNumber).max() ?? 0) + 1
+        let maximum = max(reservedTreeMaximum[plotID] ?? 0,liveTrees(in: plotID).map(\.treeNumber).max() ?? 0)
+        return maximum < 2_147_483_647 ? maximum+1 : 2_147_483_647
     }
 
     /// The name to offer for the next tree in this plot — the HIGHEST name in
@@ -288,6 +289,7 @@ extension MapHomeScreen {
             plannedPlots = []
             navTargetPlannedID = nil
             treesByPlot = [:]
+            reservedTreeMaximum = [:]
             reloadAreas()
             // No project ⇒ no plot the ring could still belong to.
             reconcileSamplingRing()
@@ -303,12 +305,14 @@ extension MapHomeScreen {
             navTargetPlannedID = nil
         }
         var byPlot: [UUID: [Tree]] = [:]
+        var maximum: [UUID:Int] = [:]
         for plot in plots {
-            byPlot[plot.id] =
-                (try? environment.treeRepository.listByPlot(plot.id,
-                                                            includeDeleted: false)) ?? []
+            let all = (try? environment.treeRepository.listCurrentByPlot(plot.id,includeDeleted: true)) ?? []
+            byPlot[plot.id] = all.filter { $0.deletedAt == nil }
+            maximum[plot.id] = all.map(\.treeNumber).max() ?? 0
         }
         treesByPlot = byPlot
+        reservedTreeMaximum = maximum
         reloadAreas()
         reconcileSamplingRing()
     }
@@ -624,26 +628,30 @@ extension MapHomeScreen {
         return "\(name) · No active plot"
     }
 
-    /// The dark PROJECT pill floating above the (+): tappable into the
-    /// project sheet, mono/semibold, one line. Dark-glass chrome (fixed
-    /// colours — it sits over satellite imagery, like the cluster
-    /// captions) so it reads distinctly from measure's light "Log".
+    /// Readable project name above the capture controls. Keep plot context
+    /// secondary instead of squeezing everything into a tiny one-line pill.
     var projectStrip: some View {
         Button {
             presentingProjectSheet = true
         } label: {
-            Text(projectStripText)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            VStack(spacing: 3) {
+                Text(currentProject?.name ?? "New project")
+                    .font(.system(size: 16, weight: .bold))
+                    .lineLimit(1)
+                Text(activePlot.map { "Plot \($0.plotNumber) · \(liveTrees(in: $0.id).count) trees" } ?? "No active plot")
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+            }
+                .frame(maxWidth: 270)
                 .foregroundStyle(Color(red: 0.949, green: 0.961, blue: 0.953)) // #F2F5F3
-                .lineLimit(1)
-                .padding(.horizontal, 13)
-                .padding(.vertical, 7)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
                 .background(
-                    Capsule().fill(Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255)
+                    RoundedRectangle(cornerRadius: 16).fill(Color(red: 6 / 255, green: 9 / 255, blue: 10 / 255)
                         .opacity(0.72)))
-                .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.14), lineWidth: 1))
                 .shadow(color: Color.black.opacity(0.18), radius: 5, y: 2)
-                .contentShape(Capsule())
+                .contentShape(RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(CruisePressableStyle())
         .accessibilityLabel("Project: \(currentProject?.name ?? "New project")")
@@ -680,7 +688,7 @@ extension MapHomeScreen {
             .portraitFullScreenCover(isPresented: $presentingCruiseDBH,
                              onDismiss: { reloadCruise() }) { cruiseDBHCover }
             .portraitFullScreenCover(isPresented: $presentingCruiseHeight,
-                             onDismiss: { reloadCruise() }) { cruiseHeightCover }
+                             onDismiss: { standaloneHeightFieldTarget = nil; reloadCruise() }) { cruiseHeightCover }
             // Tree-peek thumbnail → the app's one full-screen photo viewer.
             .portraitFullScreenCover(item: $cruisePhotoContext) { context in
                 MeasurePhotoDetailView(context: context)
@@ -692,9 +700,7 @@ extension MapHomeScreen {
             .sheet(item: $heightsSheetTarget, onDismiss: {
                 if let request = pendingScopedHeight {
                     pendingScopedHeight = nil
-                    chainPlotID = request.plotID
-                    chainTreeID = request.treeID
-                    presentingCruiseHeight = true
+                    startScopedHeight(plotID: request.plotID,treeID: request.treeID)
                 }
             }) { target in
                 if let plot = plots.first(where: { $0.id == target.plotID }) {
@@ -1218,6 +1224,8 @@ extension MapHomeScreen {
         // survives `reconcileSamplingRing` (both plots are open).
         samplingPlot.dropIfLinkedElsewhere(than: plot.id)
         chainPlotID = plot.id
+        chainProjectID = plot.projectId
+        chainDBHCalibration = calibration(from: try? environment.projectRepository.read(id: plot.projectId))
         chainTreeNumber = nextTreeNumber(in: plot.id)
         // Picked up from the plot the loop is entering, not carried over from
         // whatever was tallied last: re-entering Plot 2 after naming trees in
@@ -1225,6 +1233,9 @@ extension MapHomeScreen {
         // been named, and the loop stays nameless until the pill is tapped.
         chainTreeName = nextTreeName(in: plot.id)
         chainTreeID = nil
+        chainCaptureTarget = nil; chainExpectedTree = nil; chainCaptureSpecies = nil; chainUndo = nil
+        chainCaptureNameEdited = false
+        chainUIFlow = FieldUIFlowClock(kind: .dbh); chainCaptureRevision = UUID()
         withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
         presentingCruiseDBH = true
     }
@@ -1247,6 +1258,7 @@ extension MapHomeScreen {
         let trimmed = tallyNameDraft
             .trimmingCharacters(in: .whitespacesAndNewlines)
         chainTreeName = trimmed.isEmpty ? nil : trimmed
+        chainCaptureNameEdited = true
         renamingTallyTree = false
     }
 
@@ -1254,33 +1266,61 @@ extension MapHomeScreen {
     /// sheet). Reuses the tally plumbing: `chainTreeID` is the tree the
     /// accepted height lands on.
     func startScopedHeight(plotID: UUID, treeID: UUID) {
-        chainPlotID = plotID
-        chainTreeID = treeID
-        withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
-        presentingCruiseHeight = true
+        scopedHeightPreparation?.cancel()
+        scopedHeightPreparation = Task { @MainActor in
+            do {
+                let study = environment.fieldStudy
+                await study.awaitPendingWrites(); try Task.checkCancellation()
+                guard liveTrees(in: plotID).contains(where: { $0.id == treeID }) else { throw FieldStudyError.missing("inventory tree") }
+                let target: FieldStudyTarget?
+                if study.configuration.enabled {
+                    guard study.loaded,study.error == nil else { throw FieldStudyError.missing("field-study archive") }
+                    target = try FieldResultTargetBinding.resolve(resultIds: [treeID.uuidString],resultStore: "cruise",
+                        studyId: study.configuration.studyId,records: study.measurements,targets: study.activeTargets)
+                } else { target = nil }
+                standaloneHeightFieldTarget = target
+                chainPlotID = plotID; chainTreeID = treeID
+                withAnimation(.easeOut(duration: 0.18)) { selectedPinID = nil }
+                presentingCruiseHeight = true
+            } catch is CancellationError { }
+            catch { heightTargetFailure = error.localizedDescription }
+        }
     }
 
-    /// Tally-toast Undo: delete the just-saved tree row (and its photo
-    /// via the store) and step the auto number back.
-    func undoLastTally() {
-        guard let id = chainTreeID,
-              let tree = try? environment.treeRepository.read(id: id)
-        else { return }
-        if let photo = tree.photoPath {
-            MeasurePhotoStore.delete(photo)
-        }
-        try? environment.treeRepository.hardDelete(id: id)
+    /// Restore a remeasured inventory snapshot, or delete an unchanged new
+    /// row. Preserve all media and the original capture/timing journal.
+    func undoLastTally() async throws {
+        guard let undo = chainUndo,chainTreeID == undo.saved.id else { throw FieldStudyError.missing("Undo snapshot") }
+        try await environment.fieldStudy.performInventoryUndo(undo)
         chainTreeID = nil
+        chainUndo = nil; chainExpectedTree = undo.original
+        chainCaptureTarget = chainFieldTarget; chainCaptureSpecies = undo.original?.speciesCode
+        chainCaptureNameEdited = false
         reloadCruise()
-        if let plotID = chainPlotID {
-            chainTreeNumber = nextTreeNumber(in: plotID)
-            // Stepped back with the number, and re-derived from the plot for
-            // the same reason: the undone row is gone from `liveTrees`, so the
-            // series resolves to the name that row had. Reusing the name the
-            // loop had already advanced to would leave a gap in the series
-            // that nothing ever fills.
-            chainTreeName = nextTreeName(in: plotID)
-        }
+        chainTreeNumber = undo.saved.treeNumber; chainTreeName = undo.saved.treeName
+        chainCaptureRevision = UUID()
+    }
+
+    func retargetCruiseMeasurement(_ id: String) async throws {
+        let origin = chainCaptureRevision
+        guard let plotID = chainPlotID,presentingCruiseDBH else { throw CancellationError() }
+        let study = environment.fieldStudy
+        await study.awaitPendingWrites(); try Task.checkCancellation()
+        guard study.loaded,study.error == nil,study.issues.isEmpty,study.configuration.enabled,
+              let target = study.activeTargets.first(where: { $0.id == id }) else { throw FieldStudyError.missing("Study target") }
+        let rows = try environment.treeRepository.listCurrentByPlot(plotID,includeDeleted: true)
+        let scope = try FieldCruiseTargetBinding.resolve(target: target,plotId: plotID.uuidString,rows: rows.map {
+            .init(id: $0.id.uuidString,plotId: $0.plotId.uuidString,treeNumber: $0.treeNumber,deleted: $0.deletedAt != nil)
+        },records: study.measurements)
+        let existing = try scope.existingRowId.flatMap { try environment.treeRepository.readCurrent(id: UUID(uuidString: $0)!) }
+        if scope.existingRowId != nil,existing?.plotId != plotID || existing?.treeNumber != scope.treeNumber { throw FieldStudyError.conflict("Inventory scope changed") }
+        try Task.checkCancellation()
+        guard presentingCruiseDBH,chainPlotID == plotID,chainCaptureRevision == origin else { throw CancellationError() }
+        try study.selectTarget(target.id)
+        chainCaptureTarget = target; chainExpectedTree = existing; chainCaptureSpecies = existing?.speciesCode
+        chainCaptureNameEdited = false
+        chainTreeNumber = scope.treeNumber; chainTreeName = existing?.treeName ?? target.treeId
+        chainCaptureRevision = UUID()
     }
 
     /// The project's REAL calibration — the cruise chain must never run
@@ -1369,15 +1409,21 @@ extension MapHomeScreen {
         NavigationStack {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(
-                    calibration: calibration(from: currentProject)),
+                    calibration: chainDBHCalibration),
                 onAccept: { result, meta in
                     // The save decides everything downstream. A FAILED create
                     // reports false, and the scan screen keeps the reading on
                     // screen under its "NOT saved" banner instead of the loop
                     // advancing as if a tree existed.
                     let stored = saveChainDBH(result, meta: meta)
+                    if stored {
+                        chainFieldTarget = meta.fieldTarget; chainFieldTargetTreeID = chainTreeID
+                        chainFieldScope = meta.fieldScope
+                        chainCaptureTarget = nil; chainExpectedTree = nil; chainCaptureSpecies = nil
+                        chainCaptureNameEdited = false
+                    }
                     reloadCruise()
-                    if let plotID = chainPlotID {
+                    if stored,let plotID = chainPlotID {
                         chainTreeNumber = nextTreeNumber(in: plotID)
                         // ONLY on a save that landed, and for the same reason
                         // the number can be recomputed unconditionally: a
@@ -1405,8 +1451,13 @@ extension MapHomeScreen {
                 tallyTreeNumber: chainTreeNumber,
                 tallyTreeName: chainTreeName,
                 onRenameTally: { beginTallyRename() },
-                onUndoTally: { undoLastTally() },
-                projectID: currentProject?.id.uuidString,
+                onUndoTally: { try await undoLastTally() },
+                projectID: chainProjectID?.uuidString,
+                fieldTarget: chainCaptureTarget,
+                fieldTargetLocked: chainCaptureTarget != nil,
+                uiFlow: chainUIFlow,
+                onSelectFieldTarget: retargetCruiseMeasurement,
+                initialSpeciesCode: chainCaptureSpecies,
                 onEditPlot: {
                     // The setup session about to open rewrites the plot the
                     // tally is measuring into — a ring linked to any other
@@ -1415,6 +1466,7 @@ extension MapHomeScreen {
                     armPlotSetup(editing: chainPlotID)
                     chainingPlotSetup = true
                 })
+            .id(chainCaptureRevision)
             .environmentObject(settings)
             // Tally pill → rename. An alert rather than a sheet: it is one
             // field, it must not disturb the AR session running underneath,
@@ -1445,7 +1497,7 @@ extension MapHomeScreen {
         NavigationStack {
             HeightScanScreen(
                 viewModel: HeightScanViewModel(
-                    calibration: calibration(from: currentProject)),
+                    calibration: chainDBHCalibration),
                 onAccept: { result, meta in
                     let stored = saveChainHeight(result, meta: meta)
                     if stored { chainingHeight = false }
@@ -1455,8 +1507,12 @@ extension MapHomeScreen {
                 cruisePlotInfo: cruiseMiniMapInfo(plotID: chainPlotID),
                 // Raw-capture join keys: the height session measures a KNOWN
                 // tree, so its bundle must carry that tree's number.
-                projectID: currentProject?.id.uuidString,
+                projectID: chainProjectID?.uuidString,
                 treeNumber: chainHeightTreeNumber,
+                fieldTarget: chainFieldTargetTreeID == chainTreeID ? chainFieldTarget : nil,
+                fieldTargetLocked: true,
+                fieldScope: chainFieldTargetTreeID == chainTreeID ? chainFieldScope : nil,
+                allowsFieldTargetSelection: false,
                 treeName: chainHeightTreeName,
                 onEditPlot: {
                     armPlotSetup(editing: chainPlotID)
@@ -1488,6 +1544,9 @@ extension MapHomeScreen {
                 // tree, so its bundle must carry that tree's number.
                 projectID: currentProject?.id.uuidString,
                 treeNumber: chainHeightTreeNumber,
+                fieldTarget: standaloneHeightFieldTarget,
+                fieldTargetLocked: true,
+                allowsFieldTargetSelection: false,
                 treeName: chainHeightTreeName,
                 onEditPlot: {
                     armPlotSetup(editing: chainPlotID)
@@ -1522,7 +1581,7 @@ extension MapHomeScreen {
         let now = Date()
         let species = meta.speciesCode ?? lastSpeciesCode(in: plotID) ?? ""
         let tree = Tree(
-            id: UUID(),
+            id: meta.measurementId.flatMap(UUID.init(uuidString:)) ?? UUID(),
             plotId: plotID,
             treeNumber: chainTreeNumber,
             // The name the pill was showing when the cruiser accepted. nil is
@@ -1583,10 +1642,26 @@ extension MapHomeScreen {
             updatedAt: now,
             deletedAt: nil,
             latitude: meta.latitude,
-            longitude: meta.longitude)
+            longitude: meta.longitude,dbhMeasurementId: meta.measurementId)
         do {
-            let created = try environment.treeRepository.create(tree)
+            let created: Tree
+            let previous = chainExpectedTree
+            if let previous {
+                var patch = try FieldCruiseTreeUpdate.dbh(previous: previous,measurement: tree,speciesOverride: meta.speciesCode)
+                if chainCaptureNameEdited { patch.treeName = chainTreeName }
+                try meta.fieldReceipt?.prepare(recordId: patch.id,store: "cruise",value: Double(patch.dbhCm),
+                    inventoryReplacement: meta.fieldReceipt?.measurementId == nil ? nil : .init(tree: previous))
+                created = try environment.treeRepository.replaceIfUnchanged(patch,expected: previous)
+            } else {
+                try meta.fieldReceipt?.prepare(recordId: tree.id,store: "cruise",value: Double(tree.dbhCm))
+                created = try environment.treeRepository.createIfNumberFree(tree)
+            }
             chainTreeID = created.id
+            chainUndo = .init(original: previous,saved: created,measurementIds: meta.fieldReceipt?.measurementId.map { [$0] } ?? [])
+            let superseded = environment.fieldStudy.measurements.filter {
+                $0.kind == .dbh && $0.resultStore == "cruise" && $0.resultRecordId?.caseInsensitiveCompare(created.id.uuidString) == .orderedSame && $0.selection == .accepted
+            }.compactMap { UUID(uuidString: $0.id) }
+            meta.fieldReceipt?.confirm(recordId: created.id,store: "cruise",superseded: superseded)
             return true
         } catch {
             // The scoped tree is whatever this save wrote — and it wrote
@@ -1614,9 +1689,11 @@ extension MapHomeScreen {
     func saveChainHeight(_ result: HeightResult,
                          meta: HeightScanScreen.ScanMetadata) -> Bool {
         guard let id = chainTreeID else { return false }
-        guard var tree = try? environment.treeRepository.read(id: id)
+        guard let previous = try? environment.treeRepository.readCurrent(id: id)
         else { return false }
+        var tree = previous
         tree.heightM = result.heightM
+        tree.heightMeasurementId = meta.measurementId
         tree.heightMethod = result.method
         tree.heightSource = "measured"
         tree.heightSigmaM = result.sigmaHm
@@ -1631,7 +1708,18 @@ extension MapHomeScreen {
         }
         tree.updatedAt = Date()
         do {
-            _ = try environment.treeRepository.update(tree)
+            try meta.fieldReceipt?.prepare(recordId: tree.id,store: "cruise",value: Double(result.heightM),
+                inventoryReplacement: meta.fieldReceipt?.measurementId == nil ? nil : .init(tree: previous))
+            let saved = try environment.treeRepository.replaceIfUnchanged(tree,expected: previous)
+            if var undo = chainUndo,undo.saved == previous {
+                undo.saved = saved
+                if let measurementId = meta.fieldReceipt?.measurementId { undo.measurementIds.append(measurementId) }
+                chainUndo = undo
+            }
+            let superseded = environment.fieldStudy.measurements.filter {
+                $0.kind == .height && $0.resultStore == "cruise" && $0.resultRecordId?.caseInsensitiveCompare(tree.id.uuidString) == .orderedSame && $0.selection == .accepted
+            }.compactMap { UUID(uuidString: $0.id) }
+            meta.fieldReceipt?.confirm(recordId: tree.id,store: "cruise",superseded: superseded)
         } catch {
             return false
         }
@@ -2509,12 +2597,6 @@ extension MapHomeScreen {
             // The grade is a criterion, not a mood: tapping it opens the
             // same explainer the per-tree report and the quick peek open,
             // scoped to the measurement this row is showing.
-            Button { explainingTier = explains } label: {
-                cruiseTierChip(tier)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("What this grade means")
-            .accessibilityIdentifier("cruiseMap.treePeek.tierChip.\(explains.rawValue)")
         }
         .padding(.vertical, 6)
         .overlay(alignment: .bottom) {
@@ -2522,22 +2604,6 @@ extension MapHomeScreen {
                 Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
             }
         }
-    }
-
-    func cruiseTierChip(_ raw: String) -> some View {
-        let descriptor = ConfidenceStyle.descriptor(for: raw)
-        return HStack(spacing: 4) {
-            Circle().fill(descriptor.color).frame(width: 6, height: 6)
-            Text(descriptor.label.uppercased())
-                .font(.system(size: 10, weight: .bold))
-                .tracking(0.6)
-        }
-        .foregroundStyle(descriptor.color)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: ForestixRadius.chip)
-                .fill(descriptor.color.opacity(0.12)))
     }
 
     func detailChip(_ label: String, _ value: String) -> some View {
@@ -2944,10 +3010,6 @@ extension MapHomeScreen {
                     .padding(.top, ForestixSpace.md)
                     .padding(.bottom, ForestixSpace.xs)
 
-                ForEach(projects) { project in
-                    projectRow(project)
-                }
-
                 newProjectRow
 
                 Rectangle().fill(ForestixPalette.divider).frame(height: 0.5)
@@ -2989,12 +3051,7 @@ extension MapHomeScreen {
                     presentingProjectSheet = false
                 }
 
-                // FIELD REPORT 5 — read back THIS plot's trees without
-                // leaving the project. Only offered when a plot is actually
-                // open: with no plot in hand there is nothing to scope to,
-                // and the footer's plain "Field log" already shows
-                // everything. The subtitle names the plot so the row cannot
-                // be mistaken for that unscoped link.
+                // One field-log entry, scoped to the active plot if present.
                 if let plot = activePlot {
                     sheetChoiceRow(
                         "Field log",
@@ -3004,6 +3061,12 @@ extension MapHomeScreen {
                         disabled: false
                     ) {
                         pendingDestination = .fieldLogPlot(plot.id)
+                        presentingProjectSheet = false
+                    }
+                } else {
+                    sheetChoiceRow("Field log", subtitle: "", icon: "list.bullet.rectangle",
+                                   accessibilityID: "cruiseMap.project.fieldLog", disabled: false) {
+                        pendingDestination = .fieldLog
                         presentingProjectSheet = false
                     }
                 }
@@ -3016,14 +3079,6 @@ extension MapHomeScreen {
                 // Relocated hub tools — small footer links. (The Phase A
                 // "Classic view" bridge is retired.)
                 HStack(spacing: ForestixSpace.xs) {
-                    footerTool("Field log") {
-                        pendingDestination = .fieldLog
-                        presentingProjectSheet = false
-                    }
-                    footerTool("Reference") {
-                        pendingDestination = .reference
-                        presentingProjectSheet = false
-                    }
                     footerTool("Settings") {
                         pendingDestination = .settings
                         presentingProjectSheet = false

@@ -96,6 +96,7 @@ private data class ProjectBrowserRow(
 
 @Composable
 fun ProjectBrowserScreen(nav: NavController) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -154,7 +155,7 @@ fun ProjectBrowserScreen(nav: NavController) {
                         // left, and carrying it over would aim the tally at
                         // a plot in another project.
                         env.settings.setCruisePlotId(null)
-                        nav.popBackStack()
+                        back()
                     },
                     // The KEPT StandSummaryScreen, scoped to the browsed
                     // project. There is no second summary screen.

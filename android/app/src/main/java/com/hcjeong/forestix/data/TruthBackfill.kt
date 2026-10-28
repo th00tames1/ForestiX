@@ -69,6 +69,7 @@ object TruthBackfill {
         /// Kept verbatim so the report records the manifest's own stamp rather
         /// than a re-rendering of the parsed instant.
         val createdAt: String,
+        val measurementId: String? = null,
     )
 
     /// What a run WOULD do, computed before anything is written.
@@ -130,6 +131,7 @@ object TruthBackfill {
     fun recoverable(summaries: List<RawCaptureStore.Summary>): List<ManifestTruth> =
         summaries.mapNotNull { s ->
             if (s.mode == "cruise") return@mapNotNull null
+            if (!s.allowsLegacyInference) return@mapNotNull null
             val value = s.truthValue ?: return@mapNotNull null
             if (!value.isFinite() || value <= 0) return@mapNotNull null
             val tree = s.treeNumber ?: return@mapNotNull null
@@ -186,10 +188,11 @@ object TruthBackfill {
         defaultPlotID: UUID?,
         scanned: Int,
     ): Plan {
-        // Readings of a recoverable kind that belong to a tree, grouped.
+        val manifests=manifests.filter{it.measurementId==null}
+        // UUID-scoped records never enter the legacy nearest-time join.
         val groups = HashMap<GroupKey, MutableList<QuickMeasureEntry>>()
         for (e in entries) {
-            if (e.kind != MeasureKind.DBH && e.kind != MeasureKind.HEIGHT) continue
+            if (!e.allowsLegacyInference || (e.kind != MeasureKind.DBH && e.kind != MeasureKind.HEIGHT)) continue
             val tree = e.treeNumber ?: continue
             groups.getOrPut(GroupKey(e.kind, tree)) { mutableListOf() }.add(e)
         }

@@ -61,6 +61,7 @@ public enum DBHEpochRecompute {
     /// Every tree the sweep saw is either a `Change` or carries one of these,
     /// so the counts on screen add up to the trees on the device.
     public enum SkipReason: Sendable, Equatable {
+        case identifiedMeasurement
         /// Already carries the epoch this recompute would stamp. Makes the
         /// action idempotent, and keeps a burst aggregate from being replaced
         /// by a five-frame median for no gain (see the file header).
@@ -96,6 +97,7 @@ public enum DBHEpochRecompute {
         /// What the console prints. Byte-identical to Android.
         public var text: String {
             switch self {
+            case .identifiedMeasurement: return "identified measurement — original captured result preserved"
             case .alreadyCurrentEpoch:
                 return "already at estimator epoch \(DBHEstimator.estimatorEpoch)"
             case .typedDiameter:
@@ -121,6 +123,7 @@ public enum DBHEpochRecompute {
         /// reads the same way on both platforms.
         var groupOrder: Int {
             switch self {
+            case .identifiedMeasurement: return 9
             case .alreadyCurrentEpoch:      return 0
             case .typedDiameter:            return 1
             case .duplicateTreeNumber:      return 2
@@ -212,24 +215,6 @@ public enum DBHEpochRecompute {
     /// Every project on the device with its (non-deleted) trees. A soft-deleted
     /// tree is not offered: it is not in the cruise any more, and rewriting a
     /// row nothing reads is churn with a risk attached.
-    @MainActor
-    public static func loadProjects(environment: AppEnvironment) -> [ProjectTrees] {
-        guard let projects = try? environment.projectRepository.list() else { return [] }
-        return projects.compactMap { project in
-            guard let plots = try? environment.plotRepository.listByProject(project.id)
-            else { return nil }
-            var trees: [Tree] = []
-            for plot in plots {
-                guard let t = try? environment.treeRepository.listByPlot(plot.id) else { continue }
-                trees += t
-            }
-            guard !trees.isEmpty else { return nil }
-            return ProjectTrees(projectID: project.id,
-                                projectName: project.name,
-                                trees: trees)
-        }
-    }
-
     // MARK: - The rule
 
     /// Work out what would change for one project, changing nothing.
@@ -274,6 +259,7 @@ public enum DBHEpochRecompute {
 
             // Idempotence first: a tree already at this epoch is finished,
             // whatever else is true of it.
+            if tree.dbhMeasurementId != nil { skip(.identifiedMeasurement); continue }
             if tree.dbhEstimatorEpoch == DBHEstimator.estimatorEpoch {
                 skip(.alreadyCurrentEpoch)
                 continue
@@ -417,17 +403,18 @@ public enum DBHEpochRecompute {
                 continue
             }
             var tree = stored
-            guard tree.dbhEstimatorEpoch != DBHEstimator.estimatorEpoch,
+            guard tree.dbhMeasurementId == nil,tree.dbhEstimatorEpoch != DBHEstimator.estimatorEpoch,
                   abs(Double(tree.dbhCm) - change.storedCm) <= storedValueEpsilon
             else {
                 result.stale += 1
                 continue
             }
+            let expected = tree
             tree.dbhCm = Float(change.recomputedCm)
             tree.dbhEstimatorEpoch = DBHEstimator.estimatorEpoch
             tree.updatedAt = now
             do {
-                _ = try repository.update(tree)
+                _ = try repository.replaceIfUnchanged(tree,expected: expected)
                 result.written += 1
             } catch {
                 result.failed += 1

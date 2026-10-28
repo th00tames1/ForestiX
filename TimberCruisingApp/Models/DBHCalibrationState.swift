@@ -41,7 +41,10 @@ public enum DBHCalibration {
     ///   6 — 2026-09-26  iOS screen handles mapped to depth before sampling
     ///   7 — 2026-10-01  full-span median + paired surface correction
     ///   8 — 2026-10-06  full-span geometry shared by Adjust, AI and depth Auto
-    public static let currentEpoch = 8
+    ///   9 — 2026-10-14  central-80% depth median + matching surface correction
+    /// 10: versioned sensor-confidence inputs; Android sparse ray geometry.
+    /// Historical input-policy replay keeps its recorded epoch-9 semantics.
+    public static let currentEpoch = 10
 
     /// What a project's stored coefficients are actually doing right now.
     public enum State: Equatable, Sendable {

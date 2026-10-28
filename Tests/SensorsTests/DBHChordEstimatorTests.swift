@@ -247,7 +247,8 @@ final class DBHChordEstimatorTests: XCTestCase {
             width: width, height: height,
             depth: depth, confidence: conf,
             intrinsics: K, cameraPoseWorld: pose,
-            timestamp: 0)
+            timestamp: 0,
+            dbhDepthInputPolicy: DBHMeasurementDepth.sensorConfidence)
     }
 }
 

@@ -43,7 +43,10 @@ object DBHCalibration {
     ///   6 — 2026-09-26  iOS screen-to-depth bracket mapping; shared generation
     ///   7 — 2026-10-01  full-span median + paired surface correction
     ///   8 — 2026-10-06  full-span geometry shared by Adjust, AI and depth Auto
-    const val CURRENT_EPOCH = 8
+    ///   9 — 2026-10-14  central-80% depth median + matching surface correction
+    // 10: versioned sensor-confidence inputs and sparse ray geometry.
+    // Historical policy replay explicitly retains its epoch-9 calibration.
+    const val CURRENT_EPOCH = 10
 
     /// What a project's stored coefficients are actually doing right now.
     enum class State {

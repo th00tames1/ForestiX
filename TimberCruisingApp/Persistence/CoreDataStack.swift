@@ -24,7 +24,7 @@ public final class CoreDataStack {
     public var viewContext: NSManagedObjectContext { container.viewContext }
 
     public convenience init() throws {
-        try self.init(configuration: .sqlite(url: CoreDataStack.defaultStoreURL()))
+        try self.init(configuration: .sqlite(url: try CoreDataStack.defaultStoreURL()))
     }
 
     public init(configuration: Configuration,
@@ -96,15 +96,15 @@ public final class CoreDataStack {
 
     // MARK: - Default store URL
 
-    public static func defaultStoreURL() -> URL {
-        let fm = FileManager.default
-        let base = (try? fm.url(for: .applicationSupportDirectory,
+    public static func defaultStoreURL(fileManager fm: FileManager = .default) throws -> URL {
+        let base = try fm.url(for: .applicationSupportDirectory,
                                 in: .userDomainMask,
                                 appropriateFor: nil,
-                                create: true))
-            ?? fm.temporaryDirectory
+                                create: true)
         let dir = base.appendingPathComponent("TimberCruising", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        // A storage/permission/full-disk failure must be surfaced. Falling
+        // back to a purgeable temporary SQLite location loses field records.
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("TimberCruising.sqlite")
     }
 }

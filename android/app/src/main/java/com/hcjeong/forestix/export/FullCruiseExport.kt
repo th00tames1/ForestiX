@@ -137,7 +137,7 @@ object FullCruiseExporter {
         displayUnits: UnitSystem,
     ): ExportArtefact? = when (kind) {
         ExportArtefact.Kind.CSV_TREES -> {
-            val csv = CSVExporter.treesCSV(trees = bundle.trees)
+            val csv = CSVExporter.treesCSV(trees = bundle.trees, species = bundle.species)
             writeData(csv.toByteArray(Charsets.UTF_8), name = "trees.csv",
                 display = "Trees (CSV)", kind = kind, folder = folder)
         }

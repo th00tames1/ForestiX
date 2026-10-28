@@ -410,7 +410,7 @@ public final class AppSettings: ObservableObject {
     /// next scan without hunting for a Settings row. Note `object(forKey:)
     /// as? Bool` rather than `defaults.bool`, which would default to false.
     public var dbhEdgeAdjustDefault: Bool {
-        get { defaults.object(forKey: Keys.dbhEdgeAdjustDefault) as? Bool ?? true }
+        get { defaults.object(forKey: Keys.dbhEdgeAdjustDefault) as? Bool ?? false }
         set {
             defaults.set(newValue, forKey: Keys.dbhEdgeAdjustDefault)
             objectWillChange.send()

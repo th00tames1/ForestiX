@@ -40,11 +40,12 @@ public enum CaptureReadingMatch {
         /// `isWrongAxisReading` survive an estimator change.
         public let storedValue: Double
         public let sigma: Double?
+        public let measurementId: String?
 
         public init(bundleID: String, kind: QuickMeasureEntry.Kind, treeNumber: Int?,
                     plotID: UUID?, createdAt: Date, value: Double,
                     oppositeAxisValue: Double?, storedValue: Double,
-                    sigma: Double?) {
+                    sigma: Double?,measurementId: String? = nil) {
             self.bundleID = bundleID
             self.kind = kind
             self.treeNumber = treeNumber
@@ -54,6 +55,7 @@ public enum CaptureReadingMatch {
             self.oppositeAxisValue = oppositeAxisValue
             self.storedValue = storedValue
             self.sigma = sigma
+            self.measurementId = measurementId
         }
     }
 
@@ -113,9 +115,9 @@ public enum CaptureReadingMatch {
         // Candidate pairs, closest in time first.
         var candidates: [(gap: TimeInterval, c: Int, e: Int)] = []
         for (ci, c) in captures.enumerated() {
-            guard c.value.isFinite, c.value > 0 else { continue }
+            guard c.measurementId == nil, c.value.isFinite, c.value > 0 else { continue }
             for (ei, e) in entries.enumerated() {
-                guard e.kind == c.kind,
+                guard e.allowsLegacyInference, e.kind == c.kind,
                       e.treeNumber == c.treeNumber,
                       samePlot(e.plotID, c.plotID),
                       e.captureMode != "typed",

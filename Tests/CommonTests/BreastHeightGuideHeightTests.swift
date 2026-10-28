@@ -23,6 +23,7 @@ final class BreastHeightGuideHeightTests: XCTestCase {
         }
         XCTAssertEqual(BreastHeightGuideHeight.meters130.meters, 1.30)
         XCTAssertEqual(BreastHeightGuideHeight.meters137.meters, 1.37)
+        XCTAssertEqual(BreastHeightGuideHeight.meters140.meters, 1.40)
     }
 
     func testLabelsIdentifyTheChosenHeightInEitherUnit() {
@@ -30,5 +31,11 @@ final class BreastHeightGuideHeightTests: XCTestCase {
         XCTAssertEqual(BreastHeightGuideHeight.meters130.imperialLabel, "4.27 ft")
         XCTAssertEqual(BreastHeightGuideHeight.meters137.metricLabel, "1.37 m")
         XCTAssertEqual(BreastHeightGuideHeight.meters137.imperialLabel, "4.5 ft")
+        XCTAssertEqual(BreastHeightGuideHeight.meters140.metricLabel, "1.40 m")
+        XCTAssertEqual(BreastHeightGuideHeight.meters140.imperialLabel, "4.59 ft")
+        for height in BreastHeightGuideHeight.allCases {
+            XCTAssertEqual(height.label(imperial: false), height.metricLabel)
+            XCTAssertEqual(height.label(imperial: true), height.imperialLabel)
+        }
     }
 }

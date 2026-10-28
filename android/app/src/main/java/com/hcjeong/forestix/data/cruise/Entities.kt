@@ -170,6 +170,8 @@ data class TreeEntity(
     val createdAt: Long,
     val updatedAt: Long,
     val deletedAt: Long?,
+    val dbhMeasurementId:String?=null,
+    val heightMeasurementId:String?=null,
 )
 
 @Entity(tableName = "SpeciesConfigEntity")

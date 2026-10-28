@@ -127,6 +127,7 @@ fun StratumDrawScreen(nav: NavController, projectId: String) {
 
 @Composable
 private fun StratumDrawContent(nav: NavController, project: Project) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -146,7 +147,7 @@ private fun StratumDrawContent(nav: NavController, project: Project) {
 
     // iOS `.onChange(of: viewModel.didSave)` → dismiss.
     LaunchedEffect(didSave) {
-        if (didSave) nav.popBackStack()
+        if (didSave) back()
     }
 
     // Centre the map on the first GPS fix (iOS Map does this automatically

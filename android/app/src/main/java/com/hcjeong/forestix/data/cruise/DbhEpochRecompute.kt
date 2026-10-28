@@ -78,6 +78,9 @@ object DBHEpochRecompute {
     /// Every tree the sweep saw is either a [Change] or carries one of these,
     /// so the counts on screen add up to the trees on the device.
     sealed class SkipReason(val groupOrder: Int) {
+        object IdentifiedMeasurement : SkipReason(9) {
+            override val text="identified measurement — original captured result preserved"
+        }
 
         /// What the console prints. Byte-identical to iOS.
         abstract val text: String
@@ -264,6 +267,7 @@ object DBHEpochRecompute {
 
             // Idempotence first: a tree already at this epoch is finished,
             // whatever else is true of it.
+            if(tree.dbhMeasurementId!=null){skip(SkipReason.IdentifiedMeasurement);continue}
             if (tree.dbhEstimatorEpoch == DBHEstimator.ESTIMATOR_EPOCH) {
                 skip(SkipReason.AlreadyCurrentEpoch); continue
             }
@@ -428,16 +432,18 @@ object DBHEpochRecompute {
             // preview counts stale and is not resurrected by a write.
             val tree = runCatching { repository.read(change.treeId) }.getOrNull()
             if (tree == null ||
+                tree.dbhMeasurementId != null ||
                 tree.dbhEstimatorEpoch == DBHEstimator.ESTIMATOR_EPOCH ||
                 abs(tree.dbhCm.toDouble() - change.storedCm) > STORED_VALUE_EPSILON
             ) {
                 stale += 1
                 continue
             }
+            val expected=com.hcjeong.forestix.data.fieldstudy.FieldCruiseTreeUpdate.snapshot(tree)
             tree.dbhCm = change.recomputedCm.toFloat()
             tree.dbhEstimatorEpoch = DBHEstimator.ESTIMATOR_EPOCH
             tree.updatedAt = now
-            if (runCatching { repository.update(tree) }.isSuccess) written += 1 else failed += 1
+            if (runCatching { repository.replaceIfUnchanged(tree,expected) }.isSuccess) written += 1 else failed += 1
         }
         Result(written = written, stale = stale, failed = failed)
     }

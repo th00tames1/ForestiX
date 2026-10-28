@@ -107,6 +107,7 @@
 				2000C0B52F93050F00100933 /* Sources */,
 				2000C0B62F93050F00100933 /* Frameworks */,
 				2000C0B72F93050F00100933 /* Resources */,
+				202610160001000000000001 /* Normalize ONNX Runtime minimum OS */,
 			);
 			buildRules = (
 			);
@@ -239,6 +240,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		202610160001000000000001 /* Normalize ONNX Runtime minimum OS */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/tools/ios/fix_onnxruntime_minimum_os.sh",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/onnxruntime.framework/Info.plist",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/onnxruntime.framework/onnxruntime",
+			);
+			name = "Normalize ONNX Runtime minimum OS";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/tools/ios/fix_onnxruntime_minimum_os.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		2000C0B52F93050F00100933 /* Sources */ = {
@@ -403,10 +425,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "\"Forestix/Preview Content\"";
 				DEVELOPMENT_TEAM = 9DZJB5T89F;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO; /* Normalizes and re-signs only the embedded ONNX framework. */
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Forestix-Info.plist";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -438,10 +461,11 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_ASSET_PATHS = "\"Forestix/Preview Content\"";
 				DEVELOPMENT_TEAM = 9DZJB5T89F;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO; /* Normalizes and re-signs only the embedded ONNX framework. */
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Forestix-Info.plist";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;

@@ -107,4 +107,7 @@ data class Tree(
     var createdAt: Long,
     var updatedAt: Long,
     var deletedAt: Long?,               // soft-delete
+    /// Exact per-kind attempt UUIDs; null is legacy/unrecorded, never inferred.
+    var dbhMeasurementId:String?=null,
+    var heightMeasurementId:String?=null,
 )

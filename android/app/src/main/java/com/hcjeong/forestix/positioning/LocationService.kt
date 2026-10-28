@@ -75,6 +75,10 @@ class LocationService(
     /// first heading update arrives.
     private val _headingTrueDeg = MutableStateFlow<Double?>(null)
     val headingTrueDeg: StateFlow<Double?> = _headingTrueDeg.asStateFlow()
+    /** Optical-axis heading, not the legacy top-of-device azimuth. */
+    data class OverlayHeading(val trueDegrees:Double,val accuracyDegrees:Double,val elapsedRealtimeNanos:Long)
+    private val _overlayHeading=MutableStateFlow<OverlayHeading?>(null)
+    val overlayHeading:StateFlow<OverlayHeading?> = _overlayHeading.asStateFlow()
 
     private val locationManager: LocationManager? =
         context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -228,6 +232,7 @@ class LocationService(
     private val headingListener = object : SensorEventListener {
         private val rotationMatrix = FloatArray(9)
         private val orientation = FloatArray(3)
+        private var lastOverlayNanos=0L
 
         override fun onSensorChanged(event: SensorEvent) {
             if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
@@ -248,9 +253,25 @@ class LocationService(
                 deg += field.declination
             }
             _headingTrueDeg.value = (deg + 360.0) % 360.0
+            // SensorEvent.values[4] is heading accuracy in radians; -1/missing
+            // means unavailable, never a fabricated degree accuracy from HIGH/LOW.
+            if(event.timestamp-lastOverlayNanos>=100_000_000L){
+                lastOverlayNanos=event.timestamp
+                val east=-rotationMatrix[2].toDouble();val north=-rotationMatrix[5].toDouble()
+                val error=event.values.getOrNull(4)?.toDouble()?.takeIf{it.isFinite()&&it>=0}
+                val fixAge=snap?.let{(System.currentTimeMillis()-it.timestamp)/1000.0}
+                _overlayHeading.value=if(snap!=null&&fixAge!=null&&fixAge in 0.0..5.0&&error!=null&&
+                    event.accuracy!=SensorManager.SENSOR_STATUS_UNRELIABLE&&kotlin.math.hypot(east,north)>.01){
+                    val declination=GeomagneticField(snap.latitude.toFloat(),snap.longitude.toFloat(),0f,System.currentTimeMillis()).declination
+                    OverlayHeading((Math.toDegrees(kotlin.math.atan2(east,north))+declination+360.0)%360.0,
+                        Math.toDegrees(error),event.timestamp)
+                }else null
+            }
         }
 
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+            if(sensor?.type==Sensor.TYPE_ROTATION_VECTOR&&accuracy==SensorManager.SENSOR_STATUS_UNRELIABLE)_overlayHeading.value=null
+        }
     }
 
     companion object {

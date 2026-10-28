@@ -172,6 +172,7 @@ private enum class TreeDetailEditor { DBH, HEIGHT, NOTE }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
     val type = Forestix.type
@@ -440,14 +441,6 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                 if (!dbhEntryValid) {
                     TreeFormWarning("A typed diameter must be a number greater than zero.")
                 }
-                TreeFormConfidenceRow(
-                    label = TreeFormWords.DBH_CONFIDENCE,
-                    // A hand-typed diameter has no tier, so the row reads "—".
-                    // That is what it honestly carries, and the Capture row
-                    // below says in words that this number was typed by hand.
-                    tier = if (dbhIsTyped) null else tree.dbhConfidence.raw,
-                ) { explaining = TierExplainerKind.DIAMETER }
-
                 TreeFormMeasurementRow(
                     label = TreeFormWords.HEIGHT,
                     value = treeEnteredText(
@@ -497,10 +490,6 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                 if (!heightEntryValid) {
                     TreeFormWarning("A typed height must be a number greater than zero.")
                 }
-                TreeFormConfidenceRow(
-                    label = TreeFormWords.HEIGHT_CONFIDENCE,
-                    tier = if (heightIsTyped) null else tree.heightConfidence?.raw,
-                ) { explaining = TierExplainerKind.HEIGHT }
             }
 
             // MARK: 3 — Computed, from the measurements above — from the
@@ -573,7 +562,7 @@ private fun TreeDetailContent(nav: NavController, viewModel: TreeDetailViewModel
                 scope.launch {
                     viewModel.save()
                     if (viewModel.errorMessage.value == null && !viewModel.dirty.value) {
-                        nav.popBackStack()
+                        back()
                     }
                 }
             }
@@ -1040,45 +1029,6 @@ internal fun TreeFormSpeciesRows(code: String?, onCode: (String?) -> Unit) {
 internal fun treeSpeciesName(code: String): String? {
     val name = RegionalSpecies.nameForCode(code)
     return name.takeIf { !it.equals(code, ignoreCase = true) }
-}
-
-/// Confidence row. The chip is a BUTTON: tapping it explains the tiers and
-/// what drives them for this measurement (F8). A measurement that carries no
-/// tier reads as an em dash and explains nothing — there is nothing to
-/// explain.
-@Composable
-internal fun TreeFormConfidenceRow(
-    label: String,
-    tier: String?,
-    onExplain: () -> Unit,
-) {
-    val colors = Forestix.colors
-    if (tier == null) {
-        TreeFormRow(label = label, value = null)
-        return
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickableNoRipple(onExplain)
-            // Names the words the chip actually shows, so what a screen reader
-            // announces matches what a sighted cruiser taps.
-            .semantics { contentDescription = "$label. Explains what Good, Fair and Check mean" }
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(label, style = Forestix.type.body, color = colors.textSecondary)
-        Spacer(Modifier.weight(1f))
-        TreeFormTierBadge(tier)
-        // The app's standard "there is more behind this" affordance.
-        Icon(
-            Icons.Outlined.Info,
-            contentDescription = null,
-            tint = colors.textSecondary,
-            modifier = Modifier.size(16.dp),
-        )
-    }
 }
 
 /// The chip's WORD is the one word the app uses for that grade

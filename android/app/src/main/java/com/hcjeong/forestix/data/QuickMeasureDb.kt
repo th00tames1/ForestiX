@@ -13,6 +13,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
@@ -45,6 +46,7 @@ data class EntryRow(
     val truthUnit: String?,
     val positionSource: String?,
     val timeSource: String?,
+    val measurementId: String? = null,
 ) {
     fun toDomain() = QuickMeasureEntry(
         id = UUID.fromString(id),
@@ -71,6 +73,7 @@ data class EntryRow(
         truthUnit = truthUnit,
         positionSource = positionSource,
         timeSource = timeSource,
+        measurementId = measurementId,
     )
 
     companion object {
@@ -99,6 +102,7 @@ data class EntryRow(
             truthUnit = e.truthUnit,
             positionSource = e.positionSource,
             timeSource = e.timeSource,
+            measurementId = e.measurementId,
         )
     }
 }
@@ -148,13 +152,38 @@ data class PlotRow(
     }
 }
 
+data class FieldQuickExportSnapshot(val entries:List<EntryRow>,val plots:List<PlotRow>)
+
 @Dao
 interface QuickMeasureDao {
+    @Transaction
+    suspend fun fieldStudySnapshot():FieldQuickExportSnapshot = FieldQuickExportSnapshot(allEntries(),allPlots())
+    @Transaction
+    suspend fun saveCapturedEntry(row: EntryRow, replacing: Boolean, defaultPlotId: String?, capacity: Int,
+        expectedReplacements:List<com.hcjeong.forestix.data.fieldstudy.FieldQuickReplacementSnapshot>?=null): List<EntryRow> {
+        val all=allEntries()
+        val superseded=QuickCaptureReplacement.rows(all,row,replacing,defaultPlotId)
+        QuickCaptureReplacement.validate(superseded,expectedReplacements)
+        all.firstOrNull{it.id==row.id}?.let{old->
+            if(old!=row)throw com.hcjeong.forestix.data.fieldstudy.FieldStudyException("conflict","Captured result UUID already exists")
+            return emptyList()
+        }
+        superseded.forEach { deleteEntry(it.id) }
+        upsertEntry(row)
+        // capacity is an advisory UI threshold, never a storage eviction rule.
+        return superseded
+    }
     @Query("SELECT * FROM entries ORDER BY createdAt DESC")
     fun observeEntries(): Flow<List<EntryRow>>
 
     @Query("SELECT * FROM entries ORDER BY createdAt DESC")
     suspend fun allEntries(): List<EntryRow>
+
+    @Query("SELECT * FROM entries WHERE id = :id COLLATE NOCASE")
+    suspend fun resultSaveRows(id: String): List<EntryRow>
+
+    @Query("SELECT * FROM entries WHERE id COLLATE NOCASE IN (:ids)")
+    suspend fun resultSaveRowsForIds(ids: List<String>): List<EntryRow>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertEntry(row: EntryRow)
@@ -273,7 +302,15 @@ val QUICK_MEASURE_MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 
     }
 }
 
-@Database(entities = [EntryRow::class, PlotRow::class], version = 9, exportSchema = false)
+/** Additive identity provenance only. Existing rows remain null and every
+ * existing measurement/value/unit column is left untouched. */
+val QUICK_MEASURE_MIGRATION_9_10 = object : androidx.room.migration.Migration(9, 10) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE entries ADD COLUMN measurementId TEXT")
+    }
+}
+
+@Database(entities = [EntryRow::class, PlotRow::class], version = 10, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class ForestixDatabase : RoomDatabase() {
     abstract fun dao(): QuickMeasureDao

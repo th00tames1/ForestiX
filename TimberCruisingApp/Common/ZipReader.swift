@@ -58,6 +58,7 @@ public struct ZipEntry: Equatable, Sendable {
     public let uncompressedSize: Int
     public let localHeaderOffset: Int
     public let flags: UInt16
+    public let crc32: UInt32
 
     public var isDirectory: Bool { name.hasSuffix("/") }
 
@@ -116,13 +117,16 @@ public enum ZipReader {
                     var q = p + 4
                     if id == 0x0001 {
                         if resolvedUncomp == 0xFFFF_FFFF, q + 8 <= bytes.count {
-                            resolvedUncomp = Int(u64(bytes, q)); q += 8
+                            guard let n = Int(exactly: u64(bytes, q)) else { throw ZipReaderError.malformed("ZIP64 size overflow") }
+                            resolvedUncomp = n; q += 8
                         }
                         if resolvedComp == 0xFFFF_FFFF, q + 8 <= bytes.count {
-                            resolvedComp = Int(u64(bytes, q)); q += 8
+                            guard let n = Int(exactly: u64(bytes, q)) else { throw ZipReaderError.malformed("ZIP64 size overflow") }
+                            resolvedComp = n; q += 8
                         }
                         if resolvedLocal == 0xFFFF_FFFF, q + 8 <= bytes.count {
-                            resolvedLocal = Int(u64(bytes, q))
+                            guard let n = Int(exactly: u64(bytes, q)) else { throw ZipReaderError.malformed("ZIP64 offset overflow") }
+                            resolvedLocal = n
                         }
                         break
                     }
@@ -135,7 +139,7 @@ public enum ZipReader {
                                 compressedSize: resolvedComp,
                                 uncompressedSize: resolvedUncomp,
                                 localHeaderOffset: resolvedLocal,
-                                flags: flags))
+                                flags: flags, crc32: u32(bytes, cursor + 16)))
             cursor = nameStart + nameLen + extraLen + commentLen
         }
         return out
@@ -149,7 +153,7 @@ public enum ZipReader {
             throw ZipReaderError.encrypted(entry.name)
         }
         let lho = entry.localHeaderOffset
-        guard lho >= 0, lho + 30 <= bytes.count else {
+        guard lho >= 0, lho <= bytes.count, 30 <= bytes.count-lho else {
             throw ZipReaderError.malformed("local header offset out of range")
         }
         guard u32(bytes, lho) == 0x0403_4b50 else {
@@ -158,20 +162,25 @@ public enum ZipReader {
         let nameLen = Int(u16(bytes, lho + 26))
         let extraLen = Int(u16(bytes, lho + 28))
         let dataStart = lho + 30 + nameLen + extraLen
-        let dataEnd = dataStart + entry.compressedSize
-        guard dataStart <= bytes.count, dataEnd <= bytes.count, dataEnd >= dataStart else {
+        guard dataStart <= bytes.count, entry.compressedSize >= 0,
+              entry.compressedSize <= bytes.count-dataStart else {
             throw ZipReaderError.malformed("entry payload overruns archive")
         }
+        let dataEnd = dataStart + entry.compressedSize
         let payload = Data(bytes[dataStart..<dataEnd])
 
+        let result: Data
         switch entry.compressionMethod {
         case 0:
-            return payload
+            result = payload
         case 8:
-            return try inflate(payload, expectedSize: entry.uncompressedSize)
+            result = try inflate(payload, expectedSize: entry.uncompressedSize)
         default:
             throw ZipReaderError.unsupportedCompression(entry.compressionMethod)
         }
+        guard result.count == entry.uncompressedSize, ZipWriter.crc32(of: result) == entry.crc32
+        else { throw ZipReaderError.malformed("size or CRC mismatch: \(entry.name)") }
+        return result
     }
 
     /// Convenience: every non-directory entry as (name, bytes).
@@ -212,17 +221,18 @@ public enum ZipReader {
             guard locator >= 0, u32(bytes, locator) == 0x0706_4b50 else {
                 throw ZipReaderError.malformed("ZIP64 locator missing")
             }
-            let z64 = Int(u64(bytes, locator + 8))
-            guard z64 >= 0, z64 + 56 <= bytes.count,
+            guard let z64 = Int(exactly: u64(bytes, locator + 8)) else { throw ZipReaderError.malformed("ZIP64 offset overflow") }
+            guard z64 >= 0, z64 <= bytes.count, 56 <= bytes.count-z64,
                   u32(bytes, z64) == 0x0606_4b50 else {
                 throw ZipReaderError.malformed("ZIP64 end-of-central-directory missing")
             }
-            count = Int(u64(bytes, z64 + 32))
-            size = Int(u64(bytes, z64 + 40))
-            offset = Int(u64(bytes, z64 + 48))
+            guard let c = Int(exactly: u64(bytes, z64 + 32)), let s = Int(exactly: u64(bytes, z64 + 40)),
+                  let o = Int(exactly: u64(bytes, z64 + 48)) else { throw ZipReaderError.malformed("ZIP64 directory overflow") }
+            count = c; size = s; offset = o
         }
 
-        guard offset >= 0, size >= 0, offset + size <= bytes.count, count >= 0 else {
+        guard offset >= 0, size >= 0, offset <= bytes.count, size <= bytes.count-offset,
+              count >= 0, count <= size/46 else {
             throw ZipReaderError.malformed("central directory out of range")
         }
         return EOCD(entryCount: count,

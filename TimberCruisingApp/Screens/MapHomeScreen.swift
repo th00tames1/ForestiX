@@ -140,6 +140,16 @@ public struct MapHomeScreen: View {
     @State private var presentingRegionPicker = false
     /// Settings, opened from the gear in the top-right chrome.
     @State private var presentingSettings = false
+    @State private var fieldTargetDetail: FieldStudyTarget?
+    @State private var pendingFieldMeasurement: (targetId: String,kind: FieldStudyKind)?
+    @State private var fieldMeasurementPlotID: UUID?
+    @State private var fieldMeasurementTarget: FieldStudyTarget?
+    @State private var fieldMeasurementScope: FieldMeasurementScope?
+    @State private var fieldLaunchBusy = false
+    @State private var fieldLaunchError: String?
+    @State private var fieldRoutePreparation: Task<Void,Never>?
+    @State private var fieldQuickRevision = UUID()
+    @State private var fieldQuickUIFlow: FieldUIFlowClock?
     @State private var photoViewer: PhotoViewerContext?
     /// Quick-peek "Edit this tree" — the entry the compact edit sheet is
     /// editing (the pin's primary reading). nil = sheet closed.
@@ -253,6 +263,7 @@ public struct MapHomeScreen: View {
     @State var plots: [Plot] = []
     @State var plannedPlots: [PlannedPlot] = []
     @State var treesByPlot: [UUID: [Tree]] = [:]
+    @State var reservedTreeMaximum: [UUID: Int] = [:]
     @State var speciesByCode: [String: SpeciesConfig] = [:]
 
     // Cruise sheets / covers / pushes.
@@ -402,6 +413,21 @@ public struct MapHomeScreen: View {
     @State var chainPlotID: UUID?
     @State var chainTreeNumber: Int = 1
     @State var chainTreeID: UUID?
+    @State var chainCaptureTarget: FieldStudyTarget?
+    @State var chainExpectedTree: Tree?
+    @State var chainCaptureSpecies: String?
+    @State var chainCaptureNameEdited = false
+    @State var chainCaptureRevision = UUID()
+    @State var chainUIFlow = FieldUIFlowClock(kind: .dbh)
+    @State var chainDBHCalibration = ProjectCalibration.identity
+    @State var chainProjectID: UUID?
+    @State var chainUndo: FieldCruiseUndoState?
+    @State var chainFieldTarget: FieldStudyTarget?
+    @State var chainFieldScope: FieldMeasurementScope?
+    @State var chainFieldTargetTreeID: UUID?
+    @State var standaloneHeightFieldTarget: FieldStudyTarget?
+    @State var scopedHeightPreparation: Task<Void,Never>?
+    @State var heightTargetFailure: String?
     /// The name the NEXT tallied tree will be saved under, stepped on by
     /// `TreeNameSequence` after every save exactly as the number is. nil on a
     /// plot nobody has named — the loop then stays zero-typing and the trees
@@ -504,8 +530,11 @@ public struct MapHomeScreen: View {
     }
 
     public var body: some View {
-        NavigationStack {
-            cruisePresentations(over: ZStack {
+        NavigationStack { mapDialogs }
+    }
+
+    private var mapScene: some View {
+            ZStack {
                 map
                 // Everything drawn AT a coordinate rather than in a corner
                 // — the pressed-point pin and its menu, the selected area's
@@ -515,50 +544,8 @@ public struct MapHomeScreen: View {
                 mapObjectLayer
                 if isCruiseMode, navGuide != nil { distanceChipOverlay }
                 attributionBadge
-                VStack(spacing: ForestixSpace.xs) {
-                    topChrome
-                    // The plot's own status line: INSIDE / OUTSIDE (or
-                    // "no position"), the radius, and the live distance
-                    // from the centre — all in the cruiser's units.
-                    // Absent entirely when no plot is drawn.
-                    if isCruiseMode, let plot = cruisePlotOverlay {
-                        cruisePlotBanner(plot)
-                    }
-                    // The map is waiting for a press: says so, because an
-                    // armed gesture with no visible state is a mode the
-                    // cruiser cannot see they are in.
-                    if isCruiseMode, awaitingMapPlanPress || movingPlannedID != nil {
-                        mapPlanPromptBanner
-                    }
-                    // The overlap toggle, said once — see `areaStackHint`.
-                    if areaStackHint != nil { areaStackHintBanner }
-                    Spacer()
-                }
-                VStack {
-                    Spacer()
-                    // An outline under the thumb owns the bottom of the
-                    // screen: the cluster's actions all start something
-                    // else, and offering them mid-drag is offering to throw
-                    // the drag away.
-                    if areaDraft != nil {
-                        areaDraftBar
-                    } else if isCruiseMode {
-                        // Cruise peeks — plot ring, planned ring, tree pin.
-                        if let plot = selectedPlot {
-                            plotPeekCard(for: plot)
-                        } else if let planned = selectedPlannedPlot {
-                            plannedPeekCard(for: planned)
-                        } else if let tree = selectedTree {
-                            treePeekCard(for: tree)
-                        } else {
-                            actionCluster
-                        }
-                    } else if let pin = selectedPin {
-                        peekCard(for: pin)
-                    } else {
-                        actionCluster
-                    }
-                }
+                mapTopChrome
+                mapBottomChrome
                 // The drawn plot's Edit / Remove menu (M2) — a dialog
                 // over the map, above the peeks, so the plot stays in
                 // view behind it.
@@ -566,13 +553,71 @@ public struct MapHomeScreen: View {
                    let plot = plots.first(where: { $0.id == id }) {
                     plotOverlayMenu(for: plot)
                 }
-            })
+            }
+    }
+
+    // Keep the map's independently changing chrome behind small type
+    // boundaries. Expanding every peek/action branch into mapScene's opaque
+    // type overflowed Swift's runtime metadata decoder on a physical iPad.
+    // The same stacks, branch order, spacing and view actions remain inside.
+    private var mapTopChrome: AnyView {
+                AnyView(VStack(spacing: ForestixSpace.xs) {
+                    AnyView(topChrome)
+                    // The plot's own status line: INSIDE / OUTSIDE (or
+                    // "no position"), the radius, and the live distance
+                    // from the centre — all in the cruiser's units.
+                    // Absent entirely when no plot is drawn.
+                    if isCruiseMode, let plot = cruisePlotOverlay {
+                        AnyView(cruisePlotBanner(plot))
+                    }
+                    // The map is waiting for a press: says so, because an
+                    // armed gesture with no visible state is a mode the
+                    // cruiser cannot see they are in.
+                    if isCruiseMode, awaitingMapPlanPress || movingPlannedID != nil {
+                        AnyView(mapPlanPromptBanner)
+                    }
+                    // The overlap toggle, said once — see `areaStackHint`.
+                    if areaStackHint != nil { AnyView(areaStackHintBanner) }
+                    Spacer()
+                })
+    }
+
+    private var mapBottomChrome: AnyView {
+                AnyView(VStack {
+                    Spacer()
+                    // An outline under the thumb owns the bottom of the
+                    // screen: the cluster's actions all start something
+                    // else, and offering them mid-drag is offering to throw
+                    // the drag away.
+                    if areaDraft != nil {
+                        AnyView(areaDraftBar)
+                    } else if isCruiseMode {
+                        // Cruise peeks — plot ring, planned ring, tree pin.
+                        if let plot = selectedPlot {
+                            AnyView(plotPeekCard(for: plot))
+                        } else if let planned = selectedPlannedPlot {
+                            AnyView(plannedPeekCard(for: planned))
+                        } else if let tree = selectedTree {
+                            AnyView(treePeekCard(for: tree))
+                        } else {
+                            AnyView(actionCluster)
+                        }
+                    } else if let pin = selectedPin {
+                        AnyView(peekCard(for: pin))
+                    } else {
+                        AnyView(actionCluster)
+                    }
+                })
+    }
+
+    private var mapLifecycle: some View {
+            cruisePresentations(over: mapScene)
             .background(ForestixPalette.canvas.ignoresSafeArea())
             .onAppear {
                 startUp()
                 if isCruiseMode { reloadCruise() } else { reloadAreas() }
             }
-            .onDisappear { location.release(); developerUnlock.reset() }
+            .onDisappear { location.release(); developerUnlock.reset(); scopedHeightPreparation?.cancel(); fieldRoutePreparation?.cancel() }
             .alert("Developer mode enabled", isPresented: $showingDeveloperUnlock) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -610,12 +655,16 @@ public struct MapHomeScreen: View {
                     scanForCrashRecovery()
                 }
             }
+    }
+
+    @ViewBuilder private var measurementPresentations: some View {
             #if os(iOS)
+            mapLifecycle
             .navigationBarHidden(true)
             .portraitFullScreenCover(isPresented: $presentingDBHScan,
                              onDismiss: continueChainAfterDBH) { dbhCover }
             .portraitFullScreenCover(isPresented: $presentingHeightScan,
-                             onDismiss: { fullMeasurementChain = false }) { heightCover }
+                             onDismiss: { fullMeasurementChain = false; clearFieldMeasurementScope() }) { heightCover }
             .portraitFullScreenCover(isPresented: $presentingDistance) {
                 NavigationStack {
                     DistanceMeasureScreen()
@@ -633,9 +682,25 @@ public struct MapHomeScreen: View {
             .portraitFullScreenCover(item: $photoViewer) { context in
                 MeasurePhotoDetailView(context: context)
             }
+            #else
+            mapLifecycle
             #endif
+    }
+
+    private var quickPresentations: some View {
+            measurementPresentations
             .sheet(isPresented: $presentingChooser,
                    onDismiss: launchPendingChoice) { measureChooser }
+            .sheet(item: $fieldTargetDetail,onDismiss: launchPendingFieldMeasurement) { target in
+                NavigationStack { FieldStudyTargetDetail(store: environment.fieldStudy,targetId: target.id,onMeasure: { kind in
+                    pendingFieldMeasurement = (target.id,kind); fieldTargetDetail = nil
+                }) }
+                    .environmentObject(settings)
+            }
+            .alert("Target measurement unavailable",isPresented: Binding(get: { fieldLaunchError != nil },set: { if !$0 { fieldLaunchError = nil } })) {
+                Button("OK",role: .cancel) { fieldLaunchError = nil }
+            } message: { Text(fieldLaunchError ?? "") }
+            .disabled(fieldLaunchBusy)
             // Quick-peek "Edit this tree" — the compact per-entry editor
             // (value / species / note + confirmed delete).
             .sheet(item: $editingEntry) { entry in
@@ -671,6 +736,11 @@ public struct MapHomeScreen: View {
                     .environmentObject(history)
                     .environmentObject(settings)
             }
+    }
+
+    private var mapCaptureAlerts: some View {
+            quickPresentations
+            .modifier(FieldScopeFailureAlert(message: $heightTargetFailure))
             // Far-GPS guard — confirm before measuring a tree whose pin
             // is > 30 m from the current fix (usually a wrong-pin tap).
             .modifier(PlotSaveRefusalAlert(message: $plotSaveRefusal))
@@ -702,6 +772,10 @@ public struct MapHomeScreen: View {
                                                         in: settings.unitSystem)
                      + " from this tree's pin. Measure it anyway?")
             }
+    }
+
+    private var mapSettingsPresentations: some View {
+            mapCaptureAlerts
             .sheet(isPresented: $presentingLayers) {
                 MapSettingsSheet(visibleRegion: visibleRegion,
                                  mapCamera: camera)
@@ -746,6 +820,10 @@ public struct MapHomeScreen: View {
                 // log, so the log has to travel with it.
                 .environmentObject(history)
             }
+    }
+
+    private var mapDialogs: some View {
+            mapSettingsPresentations
             // CRASH RECOVERY — resume an in-progress plot from a recent
             // session. The summary (plot #, tree count, last-edited) is folded
             // into each Resume row, so tapping shows the "View" detail inline
@@ -772,7 +850,6 @@ public struct MapHomeScreen: View {
                      ? "A plot from an earlier session is still open. Resume it, or dismiss this reminder. Nothing is deleted."
                      : "\(candidates.count) plots from earlier sessions are still open. Resume one, or dismiss this reminder. Nothing is deleted.")
             }
-        }
     }
 
     // MARK: Map + pins
@@ -807,6 +884,7 @@ public struct MapHomeScreen: View {
     /// in measure, plot rings + cruise trees in cruise) but the camera,
     /// tiles and gestures are the same view all along.
     private var map: some View {
+        FieldStudyObservedContent(study: environment.fieldStudy) { study in
         BasemapMapView(
             camera: $camera,
             baseTileCache: baseTileCache,
@@ -825,7 +903,7 @@ public struct MapHomeScreen: View {
             // still under every pin. Cruise-only, like every other piece
             // of cruise content on this shared map.
             plotOverlay: isCruiseMode ? cruisePlotOverlay?.overlay : nil,
-            markers: isCruiseMode ? cruiseMarkers : markers,
+            markers: (isCruiseMode ? cruiseMarkers : markers) + fieldTargetMarkers(study),
             selectedMarkerID: selectedPinID,
             // THE YOU-DOT GOES THROUGH THE SAME GATE AS THE VERDICT.
             // It used to be handed the raw `latestSnapshot`, which is
@@ -862,6 +940,10 @@ public struct MapHomeScreen: View {
                 areaFill: ForestixPalette.cruiseAccent.opacity(0.14)),
             onMarkerTap: { id in
                 developerUnlock.reset()
+                if id.hasPrefix("study-"), let target = study.activeTargets.first(where: { "study-"+$0.id == id }) {
+                    fieldTargetDetail = target
+                    return
+                }
                 withAnimation(.easeOut(duration: 0.18)) {
                     selectedPinID = (selectedPinID == id) ? nil : id
                 }
@@ -898,6 +980,16 @@ public struct MapHomeScreen: View {
             })
         .ignoresSafeArea()
         .accessibilityIdentifier("mapHome.map")
+        }
+    }
+
+    private func fieldTargetMarkers(_ study: FieldStudyStore) -> [BasemapMarker] {
+        guard study.configuration.mapOverlayEnabled else { return [] }
+        return study.overlayTargets.compactMap { t in
+            guard let lat = t.latitude, let lon = t.longitude else { return nil }
+            return BasemapMarker(id: "study-"+t.id,latitude: lat,longitude: lon,title: t.label,
+                tint: t.id == study.selectedTargetId ? .green : .cyan,shape: .target)
+        }
     }
 
     /// One pin per tree number with at least one located reading —
@@ -956,16 +1048,12 @@ public struct MapHomeScreen: View {
 
     private var markers: [BasemapMarker] {
         pins.map { pin in
-            let needsAttention = pin.entries.contains {
-                $0.confidenceRaw == "red" || $0.confidenceRaw == "yellow"
-            }
             return BasemapMarker(
                 id: pin.id,
                 latitude: pin.latitude,
                 longitude: pin.longitude,
                 title: pin.title,
-                tint: needsAttention ? ForestixPalette.confidenceWarn
-                                     : ForestixPalette.primary,
+                tint: ForestixPalette.primary,
                 badge: pin.treeNumber == nil ? nil : badgeLetters(pin.entries))
         }
     }
@@ -1575,34 +1663,8 @@ public struct MapHomeScreen: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Spacer(minLength: 4)
-            if let explainerKind = row.explainerKind {
-                Button { explainingTier = explainerKind } label: {
-                    tierChip(row.confidenceRaw)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("What this grade means")
-                .accessibilityIdentifier("mapPeek.tierChip.\(row.id)")
-            } else {
-                tierChip(row.confidenceRaw)
-            }
         }
         .padding(.vertical, 6)
-    }
-
-    private func tierChip(_ raw: String) -> some View {
-        let descriptor = ConfidenceStyle.descriptor(for: raw)
-        return HStack(spacing: 4) {
-            Circle().fill(descriptor.color).frame(width: 6, height: 6)
-            Text(descriptor.label.uppercased())
-                .font(.system(size: 10, weight: .bold))
-                .tracking(0.6)
-        }
-        .foregroundStyle(descriptor.color)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: ForestixRadius.chip)
-                .fill(descriptor.color.opacity(0.12)))
     }
 
     private func photoThumb(photos: [String]) -> some View {
@@ -1778,6 +1840,7 @@ public struct MapHomeScreen: View {
     /// the covers read when they write the reading. Distance and sampling
     /// belong to no tree and never call this.
     private func lockChooserTree() {
+        clearFieldMeasurementScope()
         pendingTreeNumber = chooserTargetTree
         // `.whitespacesAndNewlines`, not `.whitespaces`: Kotlin's `trim()` in
         // the Android sibling (ui/PendingTreeNumber.set) strips newlines too,
@@ -1943,14 +2006,50 @@ public struct MapHomeScreen: View {
         // The tree rows copied any peek-card override into
         // pendingTreeNumber before dismissing — clear it here (EVERY
         // dismissal path) so the next plain (+) chooser is unscoped.
+        let existingRequested = chooserTreeOverride != nil
         chooserTreeOverride = nil
         guard let choice = pendingChoice else { return }
         pendingChoice = nil
+        if (choice == .dbh || choice == .height || choice == .fullMeasurement),fieldMeasurementTarget == nil,
+           environment.fieldStudy.configuration.enabled {
+            guard !fieldLaunchBusy else { return }
+            let requestedPlot = measurementPlotID ?? history.defaultPlotID(),requestedNumber = pendingTreeNumber
+            let requestedTarget = environment.fieldStudy.selectedTargetId
+            fieldLaunchBusy = true; fieldRoutePreparation?.cancel()
+            fieldRoutePreparation = Task { @MainActor in
+                defer { fieldLaunchBusy = false }
+                do {
+                    let study = environment.fieldStudy
+                    await study.awaitPendingWrites(); try Task.checkCancellation()
+                    guard study.loaded,study.error == nil,let plot = requestedPlot else {
+                        throw FieldStudyError.missing("Field-study archive or Measure log plot")
+                    }
+                    let fallback = history.defaultPlotID()
+                    let rows = history.entries.filter { $0.treeNumber == requestedNumber && ($0.plotID ?? fallback) == plot }
+                    if !rows.isEmpty {
+                        fieldMeasurementTarget = try FieldResultTargetBinding.resolve(resultIds: rows.map(\.id.uuidString),
+                            resultStore: "quick_history",studyId: study.configuration.studyId,records: study.measurements,targets: study.activeTargets)
+                        fieldMeasurementPlotID = plot
+                    } else if existingRequested {
+                        throw FieldStudyError.missing("Original Measure log tree")
+                    } else if let selected = requestedTarget {
+                        let route = try await FieldQuickTargetRoute.prepare(targetId: selected,plotID: plot,study: study,history: history)
+                        try Task.checkCancellation(); try applyFieldQuickRoute(route)
+                    }
+                    presentMeasurementChoice(choice)
+                } catch is CancellationError { }
+                catch { fieldLaunchError = error.localizedDescription }
+            }
+        } else { presentMeasurementChoice(choice) }
+    }
+
+    private func presentMeasurementChoice(_ choice: MeasureChoice) {
+        fieldMeasurementScope = nil
         fullMeasurementChain = (choice == .fullMeasurement)
         switch choice {
         case .fullMeasurement,
-             .dbh:      presentingDBHScan = true
-        case .height:   presentingHeightScan = true
+             .dbh:      fieldQuickUIFlow = FieldUIFlowClock(kind: .dbh); presentingDBHScan = true
+        case .height:   fieldQuickUIFlow = FieldUIFlowClock(kind: .height); presentingHeightScan = true
         case .distance: presentingDistance = true
         case .sampling: presentingSampling = true
         }
@@ -1964,13 +2063,53 @@ public struct MapHomeScreen: View {
     private func continueChainAfterDBH() {
         if chainHeightPending {
             chainHeightPending = false
+            fieldQuickUIFlow = FieldUIFlowClock(kind: .height)
             presentingHeightScan = true
         } else {
             fullMeasurementChain = false
+            clearFieldMeasurementScope()
         }
     }
 
     // MARK: Measurement covers
+
+    private var measurementPlotID: UUID? { fieldMeasurementPlotID ?? history.activePlotID }
+    private func clearFieldMeasurementScope() {
+        if let id = fieldMeasurementTarget?.id,environment.fieldStudy.selectedTargetId == id { try? environment.fieldStudy.selectTarget(nil) }
+        fieldMeasurementPlotID = nil; fieldMeasurementTarget = nil; fieldQuickUIFlow = nil; fieldMeasurementScope = nil
+    }
+    private func launchPendingFieldMeasurement() {
+        guard let request = pendingFieldMeasurement,!fieldLaunchBusy else { return }
+        pendingFieldMeasurement = nil; fieldLaunchBusy = true
+        fieldRoutePreparation = Task { @MainActor in
+            defer { fieldLaunchBusy = false }
+            do {
+                let study = environment.fieldStudy
+                let route = try await FieldQuickTargetRoute.prepare(targetId: request.targetId,plotID: nil,study: study,history: history)
+                try Task.checkCancellation(); try applyFieldQuickRoute(route)
+                pendingChoice = request.kind == .dbh ? .dbh : .height
+                launchPendingChoice()
+            } catch is CancellationError { }
+            catch { clearFieldMeasurementScope(); fieldLaunchError = error.localizedDescription }
+        }
+    }
+
+    private func applyFieldQuickRoute(_ route: FieldQuickTargetRoute) throws {
+        try environment.fieldStudy.selectTarget(route.target.id)
+        fieldMeasurementPlotID = route.plotID; fieldMeasurementTarget = route.target
+        fieldMeasurementScope = nil
+        pendingTreeNumber = route.treeNumber; pendingTreeName = route.treeName; pendingSpeciesCode = route.speciesCode
+        fieldQuickRevision = UUID()
+    }
+
+    private func retargetFieldQuickMeasurement(_ id: String) async throws {
+        let dbh = presentingDBHScan,height = presentingHeightScan
+        guard dbh || height,!height || !fullMeasurementChain else { throw FieldStudyError.conflict("Measurement scope is fixed") }
+        let route = try await FieldQuickTargetRoute.prepare(targetId: id,plotID: measurementPlotID,study: environment.fieldStudy,history: history)
+        try Task.checkCancellation()
+        guard dbh == presentingDBHScan,height == presentingHeightScan else { throw CancellationError() }
+        try applyFieldQuickRoute(route)
+    }
 
     /// The name to stamp on the reading a cover is about to write: the
     /// chooser's when this flow was launched with one, else the name the tree
@@ -1980,7 +2119,7 @@ public struct MapHomeScreen: View {
     private var resolvedTreeName: String? {
         pendingTreeName
             ?? history.treeName(forTreeNumber: pendingTreeNumber,
-                                plotID: history.activePlotID)
+                                plotID: measurementPlotID)
     }
 
     #if os(iOS)
@@ -1989,7 +2128,8 @@ public struct MapHomeScreen: View {
             DBHScanScreen(
                 viewModel: DBHScanViewModel(calibration: .identity),
                 onAccept: { result, meta in
-                    history.append(QuickMeasureEntry(
+                    let reading = QuickMeasureEntry(
+                        id: meta.measurementId.flatMap(UUID.init(uuidString:)) ?? UUID(),
                         kind: .dbh,
                         value: Double(result.diameterCm),
                         // A TYPED diameter has no propagated uncertainty —
@@ -2004,7 +2144,7 @@ public struct MapHomeScreen: View {
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
                         treeName: resolvedTreeName,
-                        plotID: history.activePlotID,
+                        plotID: measurementPlotID,
                         speciesCode: meta.speciesCode,
                         position: meta.position ?? .dbh,
                         damageCodes: meta.damageCodes,
@@ -2017,23 +2157,39 @@ public struct MapHomeScreen: View {
                         // to THIS reading. Leaving it in the raw-capture
                         // manifest alone exported a blank truth column for
                         // every tree measured the normal way.
-                        truth: meta.truth))
+                        truth: meta.truth)
+                    do {
+                        try meta.fieldReceipt?.prepare(recordId: reading.id,store: "quick_history",value: reading.value)
+                        try history.saveCapturedReading(reading)
+                    } catch { return false }
+                    meta.fieldReceipt?.confirm(recordId: reading.id,store: "quick_history")
+                    if let target = meta.fieldTarget {
+                        fieldMeasurementTarget = target
+                        if fullMeasurementChain { fieldMeasurementPlotID = reading.plotID }
+                    }
                     // Full-measurement chain: an accepted DBH arms the
                     // Height cover; onDismiss presents it for the same
                     // tree number.
                     if fullMeasurementChain { chainHeightPending = true }
+                    fieldMeasurementScope = meta.fieldScope
                     presentingDBHScan = false
-                    // Quick measure is an in-memory/JSON append that cannot
-                    // report a row-level failure — the reading is on the
-                    // history the moment this returns.
+                    // The durable journal write completed before dismissal.
                     return true
                 },
                 // Raw-capture join keys: without these a stored bundle can't
                 // be paired back to the tree (and its truth) it documents.
-                projectID: currentProject?.id.uuidString,
+                projectID: fieldMeasurementPlotID == nil ? currentProject?.id.uuidString : nil,
                 quickTreeNumber: pendingTreeNumber,
+                quickPlotID: measurementPlotID,
+                fieldTarget: fieldMeasurementTarget,
+                fieldTargetLocked: true,
+                fieldScope: fieldMeasurementScope,
+                uiFlow: fieldQuickUIFlow,
+                allowsFieldTargetSelection: true,
+                onSelectFieldTarget: retargetFieldQuickMeasurement,
                 initialSpeciesCode: pendingSpeciesCode,
-                onEditPlot: { scanPlotSetup = true })
+                onEditPlot: fieldMeasurementTarget == nil ? { scanPlotSetup = true } : nil)
+            .id(fieldQuickRevision)
             .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }
         }
     }
@@ -2055,7 +2211,8 @@ public struct MapHomeScreen: View {
             HeightScanScreen(
                 viewModel: HeightScanViewModel(calibration: .identity),
                 onAccept: { result, meta in
-                    history.append(QuickMeasureEntry(
+                    let reading = QuickMeasureEntry(
+                        id: meta.measurementId.flatMap(UUID.init(uuidString:)) ?? UUID(),
                         kind: .height,
                         value: Double(result.heightM),
                         // `QuickMeasureEntry.sigma` is already optional —
@@ -2066,7 +2223,7 @@ public struct MapHomeScreen: View {
                         method: result.method.rawValue,
                         treeNumber: pendingTreeNumber,
                         treeName: resolvedTreeName,
-                        plotID: history.activePlotID,
+                        plotID: measurementPlotID,
                         speciesCode: meta.speciesCode,
                         damageCodes: meta.damageCodes,
                         note: meta.note.isEmpty ? nil : meta.note,
@@ -2075,11 +2232,15 @@ public struct MapHomeScreen: View {
                         photoPath: meta.photoPath,
                         // The pole height typed on the scan screen belongs to
                         // THIS reading — see the note on the diameter cover.
-                        truth: meta.truth))
+                        truth: meta.truth)
+                    do {
+                        try meta.fieldReceipt?.prepare(recordId: reading.id,store: "quick_history",value: reading.value)
+                        try history.saveCapturedReading(reading)
+                    } catch { return false }
+                    meta.fieldReceipt?.confirm(recordId: reading.id,store: "quick_history")
+                    if let target = meta.fieldTarget { fieldMeasurementTarget = target }
                     presentingHeightScan = false
-                    // Quick measure is an in-memory/JSON append that cannot
-                    // report a row-level failure — the reading is on the
-                    // history the moment this returns.
+                    // The durable journal write completed before dismissal.
                     return true
                 },
                 onCrown: { widthM, heightM in
@@ -2095,15 +2256,23 @@ public struct MapHomeScreen: View {
                         method: "ar.crown.dh",
                         treeNumber: pendingTreeNumber,
                         treeName: resolvedTreeName,
-                        plotID: history.activePlotID))
+                        plotID: measurementPlotID))
                 },
                 // Raw-capture join keys — height bundles used to be anonymous
                 // (tree + project hardcoded nil), so they couldn't be paired
                 // with the tree's DBH bundle or its hand-measured truth.
-                projectID: currentProject?.id.uuidString,
+                projectID: fieldMeasurementPlotID == nil ? currentProject?.id.uuidString : nil,
                 treeNumber: pendingTreeNumber,
+                quickPlotID: measurementPlotID,
+                fieldTarget: fieldMeasurementTarget,
+                fieldTargetLocked: true,
+                fieldScope: fieldMeasurementScope,
+                uiFlow: fieldQuickUIFlow,
+                allowsFieldTargetSelection: !fullMeasurementChain,
+                onSelectFieldTarget: fullMeasurementChain ? nil : retargetFieldQuickMeasurement,
                 initialSpeciesCode: pendingSpeciesCode,
-                onEditPlot: { scanPlotSetup = true })
+                onEditPlot: fieldMeasurementTarget == nil ? { scanPlotSetup = true } : nil)
+            .id(fieldQuickRevision)
             .environmentObject(history)
             .environmentObject(settings)
             .portraitFullScreenCover(isPresented: $scanPlotSetup) { scanPlotSetupCover }

@@ -26,7 +26,8 @@ import UIKit
 public final class ResearchLog {
 
     public static let shared = ResearchLog()
-    private init() {}
+    private let storageOverride: URL?
+    init(fileURL: URL? = nil) { storageOverride = fileURL }
 
     /// Intended cross-platform column order. No Android ResearchLog exists
     /// yet — this is the schema to match when it lands so the exports join.
@@ -69,6 +70,8 @@ public final class ResearchLog {
         // clean one and the analyst could neither flag nor exclude it. Empty on
         // rows with no walk-off (DBH, typed manual heights).
         "tracking_dropped",
+        // Exact attempt join; empty on legacy rows and non-study tools.
+        "measurement_id", "save_event",
     ]
 
     private let queue = DispatchQueue(label: "forestix.researchlog")
@@ -80,6 +83,7 @@ public final class ResearchLog {
     private var headerIsCurrent = false
 
     public var fileURL: URL {
+        if let storageOverride { return storageOverride }
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return dir.appendingPathComponent("forestix_research_log.csv")
     }
@@ -385,6 +389,7 @@ public final class ResearchLog {
         let measIdx = Self.columns.firstIndex(of: "measured_value") ?? 0
         let errIdx = Self.columns.firstIndex(of: "error") ?? 0
         let unitIdx = Self.columns.firstIndex(of: "truth_unit") ?? 0
+        let identityIdx = Self.columns.firstIndex(of: "measurement_id")!
 
         var changed = false
         for i in records.indices.dropFirst() {
@@ -396,6 +401,7 @@ public final class ResearchLog {
                 row += Array(repeating: "", count: Self.columns.count - row.count)
             }
             guard let before = TruthInput.parsePositive(row[truthIdx]) else { continue }
+            guard row[identityIdx].isEmpty else { out.kept.unverifiable += 1; continue }
             guard row[unitIdx].isEmpty else {
                 out.kept.unitRecorded += 1
                 continue

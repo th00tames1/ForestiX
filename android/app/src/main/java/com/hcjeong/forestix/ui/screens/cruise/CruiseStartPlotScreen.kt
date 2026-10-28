@@ -93,6 +93,7 @@ import com.hcjeong.forestix.ui.screens.plotPillarPreviewMarkers
 /// Empty/unknown id ⇒ the original create behaviour, unchanged.
 @Composable
 fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: String = "") {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val context = LocalContext.current
     val controller = ArSessionHub.controller
@@ -272,7 +273,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                     // screen so the cruiser reads why the ring they just
                     // placed is not the new centre, and can try again from
                     // here the moment a fix arrives.
-                    if (failure == null) nav.popBackStack() else saving = false
+                    if (failure == null) back() else saving = false
                     return@launch
                 }
                 val pid = UUID.fromString(projectId)
@@ -348,7 +349,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
                         latitude = snap.latitude, longitude = snap.longitude),
                     r,
                 )
-                nav.popBackStack()
+                back()
             } catch (e: Exception) {
                 failure = "Couldn't save the plot: ${e.message ?: e}"
                 saving = false
@@ -376,7 +377,7 @@ fun CruiseStartPlotScreen(nav: NavController, projectId: String, editPlotId: Str
         CruiseOutsideFlash(isOutside)
         if (!placed) CenterCrosshair(Modifier.align(Alignment.Center))
 
-        MeasureBackButton { nav.popBackStack() }
+        MeasureBackButton(onClick = back)
 
         // Top radius slider — sampling-tool layout verbatim.
         Column(

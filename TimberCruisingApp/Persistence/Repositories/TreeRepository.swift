@@ -9,12 +9,18 @@ import Models
 
 public protocol TreeRepository {
     func create(_ t: Tree) throws -> Tree
+    func createIfNumberFree(_ t: Tree) throws -> Tree
     func read(id: UUID, includeDeleted: Bool) throws -> Tree?
+    func readCurrent(id: UUID) throws -> Tree?
+    func readCurrent(id: UUID,includeDeleted: Bool) throws -> Tree?
     func update(_ t: Tree) throws -> Tree
+    func replaceIfUnchanged(_ next: Tree,expected: Tree) throws -> Tree
+    func deleteIfUnchanged(_ expected: Tree) throws
     /// Soft delete: sets `deletedAt` to the given date (default now).
     func delete(id: UUID, at date: Date) throws
     func hardDelete(id: UUID) throws
     func listByPlot(_ plotId: UUID, includeDeleted: Bool) throws -> [Tree]
+    func listCurrentByPlot(_ plotId: UUID,includeDeleted: Bool) throws -> [Tree]
     func bySpeciesInProject(_ projectId: UUID, speciesCode: String, includeDeleted: Bool) throws -> [Tree]
 
     /// Top-N species codes by live-tree count within a project, ordered by
@@ -24,6 +30,20 @@ public protocol TreeRepository {
 }
 
 public extension TreeRepository {
+    func createIfNumberFree(_ t: Tree) throws -> Tree {
+        throw FieldStudyError.conflict("Conditional inventory creation is unavailable")
+    }
+    func readCurrent(id: UUID) throws -> Tree? { try read(id: id,includeDeleted: false) }
+    func readCurrent(id: UUID,includeDeleted: Bool) throws -> Tree? { try read(id: id,includeDeleted: includeDeleted) }
+    func listCurrentByPlot(_ plotId: UUID,includeDeleted: Bool) throws -> [Tree] {
+        try listByPlot(plotId,includeDeleted: includeDeleted)
+    }
+    func replaceIfUnchanged(_ next: Tree,expected: Tree) throws -> Tree {
+        throw FieldStudyError.conflict("Conditional inventory writes are unavailable")
+    }
+    func deleteIfUnchanged(_ expected: Tree) throws {
+        throw FieldStudyError.conflict("Conditional inventory undo is unavailable")
+    }
     func read(id: UUID) throws -> Tree? { try read(id: id, includeDeleted: false) }
     func delete(id: UUID) throws { try delete(id: id, at: Date()) }
     func listByPlot(_ plotId: UUID) throws -> [Tree] {
@@ -32,11 +52,47 @@ public extension TreeRepository {
 }
 
 public final class CoreDataTreeRepository: TreeRepository {
+    private static let inventoryWriteLock = NSRecursiveLock()
     private let stack: CoreDataStack
     public init(stack: CoreDataStack) { self.stack = stack }
+    private func writeTree<T>(_ body: @escaping (NSManagedObjectContext) throws -> T) throws -> T {
+        Self.inventoryWriteLock.lock(); defer { Self.inventoryWriteLock.unlock() }
+        return try performWrite(stack: stack,body)
+    }
+
+    public func createIfNumberFree(_ t: Tree) throws -> Tree {
+        let t = try FieldTreeMeasurementIdentity.prepare(t)
+        guard (1...2_147_483_647).contains(t.treeNumber),t.deletedAt == nil else {
+            throw FieldStudyError.conflict("Invalid new inventory row")
+        }
+        return try writeTree { ctx in
+            ctx.mergePolicy = NSErrorMergePolicy
+            if let current = try fetchOne(TreeEntity.self,entityName: "TreeEntity",keyPath: "id",value: t.id as CVarArg,in: ctx) {
+                guard try TreeMapper.toStruct(current) == t else { throw FieldStudyError.conflict("Inventory UUID already exists") }
+                return t
+            }
+            let req = NSFetchRequest<TreeEntity>(entityName: "TreeEntity")
+            req.predicate = NSPredicate(format: "plotId == %@ AND treeNumber == %d",t.plotId as CVarArg,t.treeNumber)
+            req.fetchLimit = 1
+            guard try ctx.fetch(req).isEmpty else { throw FieldStudyError.conflict("Inventory number is no longer free") }
+            let e = try insert(TreeEntity.self,entityName: "TreeEntity",in: ctx);TreeMapper.apply(t,to: e)
+            return try TreeMapper.toStruct(e)
+        }
+    }
+
+    public func readCurrent(id: UUID) throws -> Tree? {
+        try readCurrent(id: id,includeDeleted: false)
+    }
+    public func readCurrent(id: UUID,includeDeleted: Bool) throws -> Tree? {
+        try performWrite(stack: stack) { ctx in
+            guard let e = try fetchOne(TreeEntity.self,entityName: "TreeEntity",keyPath: "id",value: id as CVarArg,in: ctx),includeDeleted || e.deletedAt == nil else { return nil }
+            return try TreeMapper.toStruct(e)
+        }
+    }
 
     public func create(_ t: Tree) throws -> Tree {
-        try performWrite(stack: stack) { ctx in
+        let t = try FieldTreeMeasurementIdentity.prepare(t)
+        return try writeTree { ctx in
             let e = try insert(TreeEntity.self, entityName: "TreeEntity", in: ctx)
             TreeMapper.apply(t, to: e)
             return t
@@ -54,17 +110,40 @@ public final class CoreDataTreeRepository: TreeRepository {
     }
 
     public func update(_ t: Tree) throws -> Tree {
-        try performWrite(stack: stack) { ctx in
+        try writeTree { ctx in
             guard let e = try fetchOne(TreeEntity.self, entityName: "TreeEntity",
                                        keyPath: "id", value: t.id as CVarArg, in: ctx)
             else { throw CoreDataError.notFound(id: t.id.uuidString) }
-            TreeMapper.apply(t, to: e)
-            return t
+            let next = try FieldTreeMeasurementIdentity.prepare(t,previous: TreeMapper.toStruct(e))
+            TreeMapper.apply(next, to: e)
+            return next
+        }
+    }
+
+    public func replaceIfUnchanged(_ next: Tree,expected: Tree) throws -> Tree {
+        guard next.id == expected.id,next.plotId == expected.plotId,next.treeNumber == expected.treeNumber,
+              expected.deletedAt == nil,next.deletedAt == nil else { throw FieldStudyError.conflict("Inventory scope changed") }
+        return try writeTree { ctx in
+            ctx.mergePolicy = NSErrorMergePolicy
+            guard let e = try fetchOne(TreeEntity.self,entityName: "TreeEntity",keyPath: "id",value: expected.id as CVarArg,in: ctx),
+                  try TreeMapper.toStruct(e) == expected else { throw FieldStudyError.conflict("Inventory row changed; reopen the target") }
+            let value = try FieldTreeMeasurementIdentity.prepare(next,previous: expected)
+            TreeMapper.apply(value,to: e);return try TreeMapper.toStruct(e)
+        }
+    }
+
+    public func deleteIfUnchanged(_ expected: Tree) throws {
+        guard expected.deletedAt == nil else { throw FieldStudyError.conflict("Deleted inventory row; undo refused") }
+        try writeTree { ctx in
+            ctx.mergePolicy = NSErrorMergePolicy
+            guard let e = try fetchOne(TreeEntity.self,entityName: "TreeEntity",keyPath: "id",value: expected.id as CVarArg,in: ctx),
+                  try TreeMapper.toStruct(e) == expected else { throw FieldStudyError.conflict("Inventory row changed; undo refused") }
+            ctx.delete(e)
         }
     }
 
     public func delete(id: UUID, at date: Date) throws {
-        try performWrite(stack: stack) { ctx in
+        try writeTree { ctx in
             guard let e = try fetchOne(TreeEntity.self, entityName: "TreeEntity",
                                        keyPath: "id", value: id as CVarArg, in: ctx)
             else { throw CoreDataError.notFound(id: id.uuidString) }
@@ -74,7 +153,7 @@ public final class CoreDataTreeRepository: TreeRepository {
     }
 
     public func hardDelete(id: UUID) throws {
-        try performWrite(stack: stack) { ctx in
+        try writeTree { ctx in
             guard let e = try fetchOne(TreeEntity.self, entityName: "TreeEntity",
                                        keyPath: "id", value: id as CVarArg, in: ctx)
             else { throw CoreDataError.notFound(id: id.uuidString) }
@@ -94,6 +173,16 @@ public final class CoreDataTreeRepository: TreeRepository {
             return try fetchMany(TreeEntity.self, entityName: "TreeEntity",
                                  predicate: pred, sort: sort, in: ctx)
                 .map { try TreeMapper.toStruct($0) }
+        }
+    }
+    /// An authoritative value snapshot after conditional writes. The view
+    /// context may still be waiting to merge background-context notifications.
+    public func listCurrentByPlot(_ plotId: UUID,includeDeleted: Bool) throws -> [Tree] {
+        try performWrite(stack: stack) { ctx in
+            let predicate = includeDeleted ? NSPredicate(format: "plotId == %@",plotId as CVarArg) :
+                NSPredicate(format: "plotId == %@ AND deletedAt == nil",plotId as CVarArg)
+            return try fetchMany(TreeEntity.self,entityName: "TreeEntity",predicate: predicate,
+                sort: [NSSortDescriptor(key: "treeNumber",ascending: true)],in: ctx).map { try TreeMapper.toStruct($0) }
         }
     }
 

@@ -167,6 +167,9 @@ public struct ARDepthFrame: Sendable {
     public let viewMapping: DepthViewMapping?
     /// Live-only stamp; raw replay does not depend on the current app viewport.
     public let viewportRevision: UInt64?
+    /// Missing in historical bundles: never reinterpret derived validity as
+    /// an original LiDAR confidence observation.
+    public let dbhDepthInputPolicy: String
 
     public init(
         width: Int,
@@ -177,7 +180,8 @@ public struct ARDepthFrame: Sendable {
         cameraPoseWorld: simd_float4x4,
         timestamp: TimeInterval,
         viewMapping: DepthViewMapping? = nil,
-        viewportRevision: UInt64? = nil
+        viewportRevision: UInt64? = nil,
+        dbhDepthInputPolicy: String = DBHMeasurementDepth.legacy
     ) {
         precondition(depth.count == width * height)
         precondition(confidence.count == width * height)
@@ -190,6 +194,7 @@ public struct ARDepthFrame: Sendable {
         self.timestamp = timestamp
         self.viewMapping = viewMapping
         self.viewportRevision = viewportRevision
+        self.dbhDepthInputPolicy = dbhDepthInputPolicy
     }
 
     @inlinable
@@ -721,20 +726,62 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         guard hasLiveFrame else { return nil }
         return session.currentFrame?.capturedImage
     }
+    public func currentCameraInputSnapshot() -> RawCameraInput? {
+        guard hasLiveFrame,let frame = session.currentFrame else { return nil }
+        let buffer = frame.capturedImage; let k = frame.camera.intrinsics
+        return RawCameraInput(buffer: buffer,metadata: .init(role: "inference_source",file: nil,
+            width: CVPixelBufferGetWidth(buffer),height: CVPixelBufferGetHeight(buffer),cameraFrameSeconds: frame.timestamp,
+            imageSensorSeconds: nil,timeSource: "ar_frame_image_association",intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),viewToImage: nil,coordinateSpace: "camera_pixels_native",
+            sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16)))
+    }
+
+    /// Shutter-only acquisition. Convert depth and copy RGB from ONE ARFrame;
+    /// do not combine a published (older) depth frame with current camera RGB.
+    public func captureDBHSnapshot() -> DBHCameraSnapshot? {
+        guard hasLiveFrame, let frame = session.currentFrame,
+              case .normal = frame.camera.trackingState,
+              ProcessInfo.processInfo.systemUptime - frame.timestamp <= 0.25 else { return nil }
+        let vp = viewport.withLock { $0 }
+        guard let depth = Self.convert(frame: frame, viewportSize: vp.size,
+            orientation: vp.orientation, viewportRevision: vp.revision), let map = depth.viewMapping else { return nil }
+        let buffer = frame.capturedImage, k = frame.camera.intrinsics
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let sx = Double(width) / Double(depth.width), sy = Double(height) / Double(depth.height)
+        let image = RawCapturedImage(role: "inference_source", file: nil, width: width, height: height,
+            cameraFrameSeconds: frame.timestamp, imageSensorSeconds: nil, timeSource: "ar_frame_image_association",
+            intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),
+            viewToImage: [map.a*sx, map.b*sx, map.tx*sx, map.c*sy, map.d*sy, map.ty*sy],
+            coordinateSpace: "camera_pixels_native", sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16))
+        return DBHCameraSnapshot(frame: depth, buffer: buffer, image: image)
+    }
 
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? {
+        currentCameraImageJPEGSnapshot(quality: quality)?.data
+    }
+
+    /// Image bytes and geometry come from the SAME ARFrame. No ARKit pool buffer escapes.
+    public func currentCameraImageJPEGSnapshot(quality: Double = 0.8) -> RawCameraJPEG? {
         // Same rule as the anchor reads: a pre-run frame's captured image is
         // a photograph of wherever the cruiser was standing before the
         // pause, and it would be filed as this capture's reference RGB.
-        guard hasLiveFrame,
-              let pixelBuffer = session.currentFrame?.capturedImage else { return nil }
+        guard hasLiveFrame,let frame = session.currentFrame else { return nil }
+        let pixelBuffer = frame.capturedImage
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
         let qualityKey = CIImageRepresentationOption(
             rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        return Self.jpegContext.jpegRepresentation(
+        guard let data = Self.jpegContext.jpegRepresentation(
             of: ci,
             colorSpace: Self.jpegColorSpace,
-            options: [qualityKey: quality])
+            options: [qualityKey: quality]) else { return nil }
+        let k = frame.camera.intrinsics
+        return RawCameraJPEG(data: data,metadata: .init(role: "reference",file: nil,
+            width: CVPixelBufferGetWidth(pixelBuffer),height: CVPixelBufferGetHeight(pixelBuffer),
+            cameraFrameSeconds: frame.timestamp,imageSensorSeconds: nil,timeSource: "ar_frame_image_association",
+            intrinsics: (0..<3).flatMap { c in (0..<3).map { r in Double(k[c,r]) } },
+            cameraPose: RawCaptureMatrix.flat(frame.camera.transform),viewToImage: nil,coordinateSpace: "camera_pixels_native",
+            sourceFrameId: "ar_frame_time_bits:"+String(frame.timestamp.bitPattern,radix: 16)))
     }
 
     /// True if every frame observed since the last `run()` reported
@@ -967,7 +1014,8 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                                      orientation: orientation,
                                      depthWidth: width,
                                      depthHeight: height),
-            viewportRevision: viewportRevision
+            viewportRevision: viewportRevision,
+            dbhDepthInputPolicy: DBHMeasurementDepth.sensorConfidence
         )
     }
 }
@@ -1006,7 +1054,10 @@ public final class ARKitSessionManager: ObservableObject {
     public func worldAnchorExists(id: UUID) -> Bool { false }
     public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func currentCameraPixelBuffer() -> CVPixelBuffer? { nil }
+    public func currentCameraInputSnapshot() -> RawCameraInput? { nil }
+    public func captureDBHSnapshot() -> DBHCameraSnapshot? { nil }
     public func currentCameraImageJPEG(quality: Double = 0.8) -> Data? { nil }
+    public func currentCameraImageJPEGSnapshot(quality: Double = 0.8) -> RawCameraJPEG? { nil }
     public var trackingStayedNormal: Bool { false }
     public func beginTrackingWatch() {}
     public var trackingStayedNormalSinceWatch: Bool { false }

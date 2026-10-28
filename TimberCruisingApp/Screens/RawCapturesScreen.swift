@@ -27,18 +27,33 @@ public struct RawCapturesScreen: View {
     @State private var repairSummary: String?
     @State private var isRepairing = false
     @EnvironmentObject private var history: QuickMeasureHistory
+    @EnvironmentObject private var environment: AppEnvironment
     @State private var confirmClear = false
     /// Export runs off the main actor and can fail; both states are visible.
     @State private var isExporting = false
     @State private var exportError: String?
+    @State private var exportNotice: String?
     #if os(iOS)
     @State private var shareURL: URL?
+    @State private var completeExportURL: URL?
     #endif
 
     public init() {}
 
     public var body: some View {
         List {
+            #if os(iOS)
+            if let completeExportURL {
+                Section {
+                    ShareLink("Share complete ZIP",item: completeExportURL)
+                        .accessibilityIdentifier("rawCaptures.shareComplete")
+                }
+            }
+            #endif
+            if let exportNotice {
+                Section { Text(exportNotice).font(ForestixType.caption).foregroundStyle(ForestixPalette.textSecondary) }
+                    .accessibilityIdentifier("rawCaptures.exportNotice")
+            }
             if summaries.isEmpty {
                 Section {
                     // "No captures yet" is only true when the FOLDER is empty
@@ -205,19 +220,25 @@ public struct RawCapturesScreen: View {
             #if os(iOS)
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button { exportCompleteStudy() } label: {
+                        Label(isExporting ? "Exporting…" : "Complete field-study ZIP",systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(isExporting)
+                    .accessibilityIdentifier("rawCaptures.exportComplete")
                     Button {
                         exportCorpus()
                     } label: {
-                        Label(isExporting ? "Exporting…" : "Export ZIP",
+                        Label(isExporting ? "Exporting…" : "Raw ZIP (sensor files only)",
                               systemImage: "square.and.arrow.up")
                     }
-                    .disabled(summaries.isEmpty || isExporting)
+                    .disabled(!RawCaptureExportAvailability.canExportRaw(inventory,isExporting: isExporting))
+                    .accessibilityIdentifier("rawCaptures.exportRaw")
                     Button(role: .destructive) {
                         confirmClear = true
                     } label: {
                         Label("Clear all", systemImage: "trash")
                     }
-                    .disabled(summaries.isEmpty)
+                    .disabled(summaries.isEmpty || isExporting)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -278,7 +299,9 @@ public struct RawCapturesScreen: View {
 
     private func titleLine(_ m: RawCaptureManifest) -> String {
         let unit = m.kind == "height" ? "m" : "cm"
-        var s = String(format: "%@ %.1f %@", m.kind.uppercased(), m.resultLive.value, unit)
+        let actual = RawCapturePresentation(m).displayedValue
+        var s = actual.map { String(format: "%@ %.1f %@",m.kind.uppercased(),$0,unit) }
+            ?? m.kind.uppercased()+" · No valid measurement"
         if let t = m.truth.value {
             s += String(format: "  ·  truth %.1f", t)
         }
@@ -316,10 +339,9 @@ public struct RawCapturesScreen: View {
     /// The ZIP holds every bundle, including ones the field log has moved on
     /// from. Byte-identical to the Android sibling.
     static let corpusCompletenessNotice =
-        "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose "
-        + "reading was deleted or retaken is still in it, and a ground truth "
-        + "the field log has since corrected keeps its original value here. "
-        + "Nothing is filtered out."
+        "Raw ZIP contains every raw bundle, including retaken or deleted readings. "
+        + "Complete field-study ZIP also includes measurement UUIDs, reference observations, "
+        + "elapsed times, protocol snapshots, application results and an integrity audit."
 
     /// "X MB on device · Y GB free".
     private var storageFooter: String {
@@ -353,6 +375,8 @@ public struct RawCapturesScreen: View {
         guard !isExporting else { return }
         isExporting = true
         exportError = nil
+        exportNotice = nil
+        completeExportURL = nil
         Task.detached(priority: .userInitiated) {
             do {
                 let url = try RawCaptureStore.exportZIPStreaming()
@@ -368,6 +392,21 @@ public struct RawCapturesScreen: View {
                     isExporting = false
                 }
             }
+        }
+        #endif
+    }
+    private func exportCompleteStudy() {
+        #if os(iOS)
+        guard !isExporting else { return }
+        guard environment.fieldStudy.loaded else { exportError = "Field-study archive is still loading. Retry shortly."; return }
+        isExporting = true; exportError = nil; exportNotice = nil; completeExportURL = nil
+        Task { @MainActor in
+            defer { isExporting = false }
+            do {
+                let artifact = try await FieldStudyExportApplication.build(environment: environment)
+                exportNotice = "Exported \(artifact.report.measurementCount) attempts and \(artifact.report.rawBundleCount) raw bundles. Integrity issues: \(artifact.report.issues.count). See audit.json."
+                completeExportURL = artifact.url // System ShareLink supplies the iPad presentation anchor.
+            } catch { exportError = error.localizedDescription }
         }
         #endif
     }
@@ -473,7 +512,7 @@ public struct RawCapturesScreen: View {
             // Data, not a `QuickMeasureEntry`, so there is nothing here to
             // pair it with and a tree number would collide across the two
             // worlds if we tried.
-            guard m.context.mode != "cruise",
+            guard m.measurementId == nil, m.captureEvidence == nil, m.context.mode != "cruise",
                   let kind = readingKind(m.kind),
                   let when = TruthBackfill.parseISO(m.createdAt)
             else { continue }
@@ -536,6 +575,7 @@ public struct RawCapturesScreen: View {
 // MARK: - Detail
 
 struct RawCaptureDetailView: View {
+    @EnvironmentObject private var settings: AppSettings
 
     let id: String
     var onChange: () -> Void
@@ -554,7 +594,7 @@ struct RawCaptureDetailView: View {
             if let m = manifest {
                 overviewSection(m)
                 comparisonSection(m)
-                truthSection(m)
+                if settings.developerMode,RawCapturePresentation(m).allowsTruth { truthSection(m) }
                 metaSection(m)
             } else {
                 Text("Bundle unavailable.")
@@ -587,9 +627,14 @@ struct RawCaptureDetailView: View {
     private func overviewSection(_ m: RawCaptureManifest) -> some View {
         Section {
             labeled("Kind", m.kind.uppercased())
-            labeled("Live value", String(format: "%.2f %@", m.resultLive.value, unit))
-            labeled("σ", String(format: "%.2f", m.resultLive.sigma))
-            labeled("Tier", m.resultLive.tier)
+            let display = RawCapturePresentation(m)
+            labeled(display.usesExactEvidence ? "Displayed measurement" : "Legacy recorded result",
+                    display.displayedValue.map { String(format: "%.2f %@",$0,unit) } ?? "No valid measurement")
+            labeled("σ",display.sigma.map { String(format: "%.2f",$0) } ?? "—")
+            labeled("Tier",display.tier ?? "—")
+            if display.usesExactEvidence {
+                labeled("Canonical fit (separate)",display.canonicalValue.map { String(format: "%.2f %@",$0,unit) } ?? "—")
+            }
             // A thin burst (dusk / canopy / tracking loss) is recorded rather
             // than dropped — the count is visible so it can be weighed in
             // analysis. Height bundles carry 0–2 aim frames.
@@ -614,12 +659,13 @@ struct RawCaptureDetailView: View {
     @ViewBuilder
     private func comparisonSection(_ m: RawCaptureManifest) -> some View {
         Section {
-            labeled("Live (recorded)", String(format: "%.2f %@", m.resultLive.value, unit))
+            let actual = RawCapturePresentation(m).displayedValue
+            labeled("Displayed measurement",actual.map { String(format: "%.2f %@",$0,unit) } ?? "No valid measurement")
             labeled("Re-run (current)",
                     didRerun ? (rerunPrimary.map { String(format: "%.2f %@", $0, unit) } ?? "—")
                              : "tap Re-run")
-            if didRerun, let r = rerunPrimary {
-                labeled("Δ re-run − live", String(format: "%+.3f %@", r - m.resultLive.value, unit))
+            if didRerun, let r = rerunPrimary,let actual {
+                labeled("Δ re-run − displayed", String(format: "%+.3f %@", r - actual, unit))
             }
             if m.kind == "height", didRerun {
                 labeled("Re-run (reposed d_h)",
@@ -666,6 +712,7 @@ struct RawCaptureDetailView: View {
             // wiped a good hand measurement on the way past.
             if m.truth.value != nil {
                 Button(role: .destructive) {
+                    guard settings.developerMode else { return }
                     truthStatus = RawCaptureStore.clearTruth(id: id) == .applied
                         ? "Truth cleared." : "Couldn't clear the truth."
                     load()
@@ -690,6 +737,7 @@ struct RawCaptureDetailView: View {
     /// Save guard: an empty or unparseable field NEVER overwrites a stored
     /// truth, and the input is left alone so nothing typed is lost.
     private func saveTruth() {
+        guard settings.developerMode else { truthStatus = "Ground-truth editing requires developer mode."; return }
         // parsePositiveBASE, not parsePositive: the value stored is the metric
         // base and `consoleUnit` is what the field says it is being typed in.
         // They agree today only because this console is hardcoded metric — the

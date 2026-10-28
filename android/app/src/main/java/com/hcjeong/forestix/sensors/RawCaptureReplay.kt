@@ -7,19 +7,52 @@
 // meaningful: the only thing that changes between the live number and a
 // replay is the estimator version, never the reconstruction.
 //
-// The u16-mm depth bytes are re-ingested through ArDepthFrame.ingestMmInto
-// (the single shared rule the live capture path uses), so a reconstructed
-// frame is bit-identical to the one the estimator consumed in the field.
+// Legacy u16-mm bytes use the live ingestMmInto rule; f32m fallback is read
+// without quantization. Explicit confidence and modern checksummed inputs
+// are never replaced by confidence derived from depth.
 
 package com.hcjeong.forestix.sensors
 
 import com.hcjeong.forestix.ar.Vec3
 import org.json.JSONObject
 import java.io.File
-import java.nio.ByteOrder
 import kotlin.math.tan
 
 object RawCaptureReplay {
+    /** Independent shadow comparison; does not change production replay or
+     * enter the calibration/winner registry with experimental algorithms. */
+    fun replayDepthComparison(dir:File,manifest:JSONObject)=manifest.optJSONObject("dbh_depth_comparison")?.let{
+        DbhDepthComparisonIO.replay(dir,manifest.getString("measurement_id"),
+            kotlinx.serialization.json.Json.parseToJsonElement(it.toString()) as kotlinx.serialization.json.JsonObject)
+            .also{report->DbhDepthComparisonIO.requireOriginalAssociation(report,
+                RawCaptureEvidence.parse(manifest.getJSONObject("capture_evidence").toString()))}
+    }
+    fun rerunCapturedDbh(dir:File,manifest:JSONObject):Double? {
+        if(!manifest.has("capture_evidence")||manifest.isNull("capture_evidence"))return null
+        return rerunDbh(dir,manifest,modernDbhFrames(dir,manifest))?.value
+    }
+    private fun modernDbhFrames(dir:File,manifest:JSONObject):List<ArDepthFrame> {
+        val e=RawCaptureEvidence.parse(manifest.getJSONObject("capture_evidence").toString())
+        val descriptors=manifest.optJSONObject("dbh")?.optJSONArray("frames")
+        require(descriptors!=null){"Recorded DBH descriptors"}
+        require(e.frames.withIndex().all{(i,f)->descriptors.optJSONObject(i)?.optString("depth_input_policy",DbhMeasurementDepth.LEGACY_FULL)==f.depthInputPolicy}){"Recorded input policy identity"}
+        val dimensions=(0 until descriptors.length()).map{val d=descriptors.getJSONObject(it);d.getInt("width") to d.getInt("height")}
+        return restoreOriginalDbhFrames(dir,manifest.optString("measurement_id"),e,dimensions)
+    }
+    internal fun restoreOriginalDbhFrames(dir:File,id:String,e:RawCaptureEvidence,dimensions:List<Pair<Int,Int>>):List<ArDepthFrame> {
+        require(e.measurementId==id&&e.frames.size in 1..32&&e.frames.size==dimensions.size&&
+            e.frames.withIndex().all{(i,f)->f.role=="dbh_$i"&&f.width==dimensions[i].first&&f.height==dimensions[i].second}){"Recorded DBH input identity"}
+        return e.frames.map{RawCaptureEvidenceIO.readFrame(it,dir)}
+    }
+    fun rerunCapturedHeight(manifest:JSONObject):Double? {
+        val text=manifest.optJSONObject("capture_evidence")?.toString()?:return null
+        val e=RawCaptureEvidence.parse(text);require(e.measurementId==manifest.optString("measurement_id")){"Recorded height identity"}
+        val v=e.scalars
+        require(listOf("alpha_base_rad","alpha_top_rad","anchor_x","anchor_z","standing_x","standing_z").all{it in v}){"Recorded height scalars"}
+        return HeightEstimator.estimate(v.getValue("anchor_x").toFloat(),v.getValue("anchor_z").toFloat(),
+            v.getValue("standing_x").toFloat(),v.getValue("standing_z").toFloat(),v.getValue("alpha_top_rad").toFloat(),
+            v.getValue("alpha_base_rad").toFloat(),calibrationFrom(manifest.optJSONObject("settings")).vioDriftFraction).heightM.toDouble()
+    }
 
     /// Enough scored captures for a "best algorithm" claim to mean anything.
     /// Below this the ranking is shown but no winner is crowned — an RMSE
@@ -52,45 +85,48 @@ object RawCaptureReplay {
 
     // MARK: - Frame reconstruction
 
-    /// Rebuild the exact ArDepthFrame list the DBH estimator consumed:
-    /// re-ingest each depth_N.bin (little-endian u16 mm, row-major) through
-    /// the shared ingest rule and attach the stored intrinsics / pose /
-    /// view→depth affine. Skips any frame whose .bin is missing or the wrong
-    /// size (defensive — a truncated bundle replays what it can).
+    /// Rebuild every ordered frame or refuse the bundle. A partial subset
+    /// cannot stand in for the original burst. Historical confidence is
+    /// derived only when confidence_file was never recorded.
     fun reconstructDbhFrames(dir: File, manifest: JSONObject): List<ArDepthFrame> {
+        // Prefer the exact, checksummed input, including known depth age.
+        // Malformed modern evidence must NEVER fall back to age=0 legacy bytes.
+        val original=if(manifest.has("capture_evidence")&&!manifest.isNull("capture_evidence"))
+            runCatching{modernDbhFrames(dir,manifest)}.getOrElse{return emptyList()} else null
         val dbh = manifest.optJSONObject("dbh") ?: return emptyList()
         val frames = dbh.optJSONArray("frames") ?: return emptyList()
+        if(frames.length() !in 1..32)return emptyList()
+        if(original==null&&(0 until frames.length()).any{frames.optJSONObject(it)?.optString("depth_input_policy",DbhMeasurementDepth.LEGACY_FULL)!=DbhMeasurementDepth.LEGACY_FULL})
+            return emptyList() // New policy cannot be replayed as age-free dense input.
         val out = ArrayList<ArDepthFrame>(frames.length())
         for (i in 0 until frames.length()) {
-            val fo = frames.optJSONObject(i) ?: continue
+            val fo = frames.optJSONObject(i) ?: return emptyList()
             val w = fo.optInt("width")
             val h = fo.optInt("height")
-            if (w <= 0 || h <= 0) continue
-            val depthFile = File(dir, fo.optString("depth_file"))
-            val shorts = readU16Le(depthFile, w * h) ?: continue
-            val depth = FloatArray(w * h)
-            val conf = ByteArray(w * h)
-            for (idx in 0 until w * h) {
-                ArDepthFrame.ingestMmInto(shorts[idx].toInt() and 0xFFFF, idx, depth, conf)
-            }
-            val pose = jsonToFloatArray(fo.optJSONArray("camera_pose"), 16) ?: continue
+            val grid=runCatching{RawDepthGridIO.read(dir,w,h,fo.optString("format"),fo.optString("depth_file"),
+                if(fo.has("confidence_file")&&!fo.isNull("confidence_file"))fo.getString("confidence_file")else null)}.getOrNull()?:return emptyList()
+            val pose = jsonToFloatArray(fo.optJSONArray("camera_pose"), 16) ?: return emptyList()
             val affine = jsonToFloatArray(fo.optJSONArray("view_to_depth"), 6)
+            if(!pose.all{it.isFinite()}||!listOf("fx","fy","cx","cy").all{fo.optDouble(it).isFinite()}||
+                (fo.has("view_to_depth")&&!fo.isNull("view_to_depth")&&(affine==null||!affine.all{it.isFinite()})))return emptyList()
             out.add(
                 ArDepthFrame(
-                    w, h, depth, conf,
+                    w, h, grid.depth, grid.confidence,
                     fo.optDouble("fx"), fo.optDouble("fy"),
                     fo.optDouble("cx"), fo.optDouble("cy"),
                     pose, depthFromViewAffine = affine,
                 ),
             )
         }
-        return out
+        // The legacy bundle completeness audit remains intact. Once it
+        // passes, calculate with the exact original, not age-free legacy input.
+        return original?:out
     }
 
     // MARK: - DBH re-run (shared production entry points)
 
-    fun rerunDbh(dir: File, manifest: JSONObject): DbhReplay? {
-        val frames = reconstructDbhFrames(dir, manifest)
+    fun rerunDbh(dir: File, manifest: JSONObject, recordedFrames:List<ArDepthFrame>?=null): DbhReplay? {
+        val frames = recordedFrames ?: reconstructDbhFrames(dir, manifest)
         if (frames.isEmpty()) return null
         val dbh = manifest.optJSONObject("dbh") ?: return null
         val settings = manifest.optJSONObject("settings")
@@ -449,18 +485,6 @@ object RawCaptureReplay {
         if (arr == null || arr.length() != expected) return null
         val out = FloatArray(expected)
         for (i in 0 until expected) out[i] = arr.optDouble(i).toFloat()
-        return out
-    }
-
-    /// Read a little-endian u16 grid of exactly `count` samples, or null if
-    /// the file is missing / the wrong length.
-    private fun readU16Le(file: File, count: Int): ShortArray? {
-        if (!file.exists()) return null
-        val bytes = file.readBytes()
-        if (bytes.size != count * 2) return null
-        val buf = java.nio.ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        val out = ShortArray(count)
-        buf.get(out)
         return out
     }
 

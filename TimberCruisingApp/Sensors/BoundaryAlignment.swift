@@ -24,17 +24,31 @@ public enum BoundaryAlignment {
     }
     static func mad(_ a: [Double]) -> Double { let m = median(a); return median(a.map { abs($0 - m) }) }
     static func valid(_ a: [Double]) -> [Double] { a.filter { $0.isFinite && $0 > 0.001 && $0 <= 8 } }
+    /// Central width selected by the 10%-step RMSE comparison on each platform.
+    /// Only depth sampling is narrowed; the measured silhouette width is unchanged.
+    public static let samplingFraction = 0.8
+    public static let sampledDepthOffsetFactor = 1 - sqrt(1 - pow(samplingFraction / 2, 2))
+    public static func sampledDiameterCm(spanPx: Double, medianDepthM: Double,
+                                         focalPx: Double) -> Double? {
+        surfaceCorrectedDiameterCm(spanPx: spanPx, medianDepthM: medianDepthM,
+            focalPx: focalPx, offsetFactor: sampledDepthOffsetFactor)
+    }
     /// Surface-corrected tangent inversion for a full-span spatial median.
     /// c = 1 - sqrt(3)/2 is derived from the uniform-lateral circular model,
     /// not a fitted sensor multiplier. Raw depth pixels are never changed.
     public static let fullSpanDepthOffsetFactor = 1.0 - sqrt(0.75)
     public static func fullSpanDiameterCm(spanPx: Double, medianDepthM: Double,
                                           focalPx: Double) -> Double? {
+        surfaceCorrectedDiameterCm(spanPx: spanPx, medianDepthM: medianDepthM,
+            focalPx: focalPx, offsetFactor: fullSpanDepthOffsetFactor)
+    }
+    private static func surfaceCorrectedDiameterCm(spanPx: Double, medianDepthM: Double,
+                                                    focalPx: Double, offsetFactor: Double) -> Double? {
         guard spanPx.isFinite, medianDepthM.isFinite, focalPx.isFinite,
               spanPx > 0, medianDepthM > 0, focalPx > 1 else { return nil }
         let k = spanPx / (2 * focalPx)
         let q = k * (k + sqrt(1 + k * k))
-        let cm = 200 * medianDepthM * q / (1 + fullSpanDepthOffsetFactor * q)
+        let cm = 200 * medianDepthM * q / (1 + offsetFactor * q)
         return cm.isFinite && cm > 0 ? cm : nil
     }
 
@@ -42,19 +56,42 @@ public enum BoundaryAlignment {
     /// Read only the measurement row, not an allocated copy of the entire map.
     public static func fullSpanSample(width: Int, left: Double, right: Double,
                                       focal: Double, depthAt: (Int) -> Double) -> (Double, Double)? {
+        sample(width: width, left: left, right: right, focal: focal, fraction: 1, depthAt: depthAt)
+    }
+    /// Integer pixel centres in the central 80% of the continuous guide span.
+    public static func sampledDepth(width: Int, left: Double, right: Double,
+                                     focal: Double, depthAt: (Int) -> Double) -> (Double, Double)? {
+        sample(width: width, left: left, right: right, focal: focal,
+            fraction: samplingFraction, depthAt: depthAt)
+    }
+    private static func sample(width: Int, left: Double, right: Double, focal: Double,
+                                fraction: Double, depthAt: (Int) -> Double) -> (Double, Double)? {
         guard width > 0, left.isFinite, right.isFinite,
               left >= 0, right < Double(width), right > left else { return nil }
-        let lo = Int(ceil(left)), hi = Int(floor(right))
+        let margin = (right - left) * (1 - fraction) / 2
+        let tolerance = fraction < 1 ? 8 * Double.ulpOfOne * max(1, max(abs(left), abs(right))) : 0
+        let lo = max(0, Int(ceil(left + margin - tolerance)))
+        let hi = min(width - 1, Int(floor(right - margin + tolerance)))
         guard hi >= lo else { return nil }
-        let samples = valid((lo...hi).map(depthAt))
+        let samples = (lo...hi).map(depthAt).filter { $0.isFinite && $0 >= 0.001 && $0 <= 8 }
         guard samples.count >= 3 else { return nil }
         let z = median(samples)
         guard z >= 0.3, z <= 5,
-              let cm = fullSpanDiameterCm(spanPx: right - left, medianDepthM: z, focalPx: focal)
+              let cm = surfaceCorrectedDiameterCm(spanPx: right - left, medianDepthM: z,
+                focalPx: focal, offsetFactor: 1 - sqrt(1 - pow(fraction / 2, 2)))
         else { return nil }
         return (cm, z)
     }
     public static func diameter(_ g: Grid, left: Double, right: Double) -> (Double, Double)? {
+        guard g.width > 0, g.height > 0, g.depth.count == g.width * g.height,
+              g.row >= 0, g.row < g.height else { return nil }
+        return sampledDepth(width: g.width, left: left, right: right, focal: g.focal) {
+            g.at($0, g.row)
+        }
+    }
+    /// Keep the established boundary-support checks independent of the final
+    /// depth-sampling setting; their purpose is to reject background and occlusion.
+    private static func boundarySupportSample(_ g: Grid, left: Double, right: Double) -> (Double, Double)? {
         guard g.width > 0, g.height > 0, g.depth.count == g.width * g.height,
               g.row >= 0, g.row < g.height else { return nil }
         return fullSpanSample(width: g.width, left: left, right: right, focal: g.focal) {
@@ -84,8 +121,9 @@ public enum BoundaryAlignment {
     public static func correct(_ g: Grid, rgbPixelsPerDepthPixel scale: Double,
                                mask: (Int,Int) -> Bool,
                                rowSegments: (Int) -> [(Double,Double)]) -> Result? {
-        guard let (base,zold) = diameter(g,left:g.left,right:g.right), scale > 0 else { return nil }
-        func retained(_ why: String) -> Result { Result(left:g.left,right:g.right,diameterCm:base,leftReason:why,rightReason:why) }
+        guard let (base,_) = boundarySupportSample(g,left:g.left,right:g.right),
+              let (originalDiameter,_) = diameter(g,left:g.left,right:g.right), scale > 0 else { return nil }
+        func retained(_ why: String) -> Result { Result(left:g.left,right:g.right,diameterCm:originalDiameter,leftReason:why,rightReason:why) }
         let span = g.right-g.left
         let core = (0..<g.width).filter { Double($0) >= g.left+0.25*span && Double($0) <= g.right-0.25*span }
         guard !core.isEmpty else { return retained("empty_core") }
@@ -133,8 +171,9 @@ public enum BoundaryAlignment {
                 else { proposed[side] = old+0.5*(b-old) }
             }
         }
-        guard let (dia,z) = diameter(g,left:proposed[0],right:proposed[1]), z <= zc+base/200+3*noise else { return retained("incoherent_result") }
-        _ = zold
+        guard let (_,supportDepth) = boundarySupportSample(g,left:proposed[0],right:proposed[1]),
+              supportDepth <= zc+base/200+3*noise,
+              let (dia,_) = diameter(g,left:proposed[0],right:proposed[1]) else { return retained("incoherent_result") }
         return Result(left:proposed[0],right:proposed[1],diameterCm:dia,leftReason:reasons[0],rightReason:reasons[1])
     }
 }

@@ -259,9 +259,6 @@ public struct TreeDetailScreen: View {
             if !dbhEntryValid {
                 entryWarning("A typed diameter must be a number greater than zero.")
             }
-            confidenceRow(label: TreeFormWords.dbhConfidence,
-                          rawTier: dbhIsTyped ? nil : viewModel.tree.dbhConfidence.rawValue,
-                          kind: .diameter)
 
             TreeFormRows.measurement(
                 label: TreeFormWords.height,
@@ -279,10 +276,6 @@ public struct TreeDetailScreen: View {
             if !heightEntryValid {
                 entryWarning("A typed height must be a number greater than zero.")
             }
-            confidenceRow(label: TreeFormWords.heightConfidence,
-                          rawTier: heightIsTyped ? nil
-                                                 : viewModel.tree.heightConfidence?.rawValue,
-                          kind: .height)
         }
     }
 
@@ -545,19 +538,6 @@ public struct TreeDetailScreen: View {
             Text(unit)
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 22, alignment: .leading)
-        }
-    }
-
-    /// Confidence row, shared with the field log's record sheet: the chip is a
-    /// BUTTON, and tapping it explains the tiers and what drives them for this
-    /// measurement. A measurement with no tier keeps its row and reads "—".
-    private func confidenceRow(label: String,
-                               rawTier: String?,
-                               kind: TierExplainer.Kind) -> some View {
-        TreeFormRows.confidence(label: label,
-                                rawTier: rawTier,
-                                identifier: "treeDetail.\(kind.rawValue)ConfidenceChip") {
-            explaining = kind
         }
     }
 
@@ -1110,6 +1090,8 @@ struct TreeFormSpeciesRows: View {
     let onEdited: () -> Void
 
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var environment: AppEnvironment
+    @State private var browsingSpecies = false
 
     /// What the cruiser CHOSE, once they have chosen. nil means they have not,
     /// and the free-text row is decided by the stored code instead — a code
@@ -1140,6 +1122,14 @@ struct TreeFormSpeciesRows: View {
             Text("Other code…").tag(Self.otherTag)
         }
         .accessibilityIdentifier("\(identifierPrefix).speciesPicker")
+        Button("Browse species…") { browsingSpecies = true }
+            .sheet(isPresented: $browsingSpecies) {
+                NavigationStack {
+                    SpeciesSettingsScreen(catalog: environment.speciesCatalog) { selected in
+                        code = selected.code; freeTextChoice = false; onEdited()
+                    }
+                }
+            }
 
         // Escape hatch: a code the country/region list doesn't carry. Typing
         // here stores the code verbatim.
@@ -1174,7 +1164,7 @@ struct TreeFormSpeciesRows: View {
     /// Species offered by the ACTIVE country (and, for the US, region), plus
     /// the same "Other" catch-all the scan-time sheet carries.
     private var options: [(String, String)] {
-        settings.country.speciesPresets(region: settings.region) + [("OT", "Other")]
+        environment.speciesCatalog.options(country: settings.country, region: settings.region).map { ($0.code, $0.commonName) }
     }
 
     /// The preset entry whose code matches `code` case-insensitively, so a
@@ -1217,6 +1207,7 @@ struct TreeFormSpeciesRows: View {
     /// Name-first option label — the common name reads prominently, the code
     /// trails dim (" · DF"). Identical treatment to `ScanMetadataSheet`.
     private static func pickerLabel(name: String, code: String) -> AttributedString {
+        if code.hasPrefix("USR-") { return AttributedString(name) }
         var label = AttributedString(name)
         var suffix = AttributedString(" · \(code)")
         suffix.foregroundColor = ForestixPalette.textSecondary

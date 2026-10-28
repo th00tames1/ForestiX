@@ -10,8 +10,9 @@ import XCTest
 enum TestModelLoader {
 
     /// Compile the repo's xcdatamodeld with momc and return the model.
-    static func loadTimberCruisingModel() throws -> NSManagedObjectModel {
-        let modelSrcPath = try locateModelSource()
+    static func loadTimberCruisingModel(version: String? = nil) throws -> NSManagedObjectModel {
+        let root = try locateModelSource()
+        let modelSrcPath = version.map { root.appendingPathComponent($0+".xcdatamodel") } ?? root
         let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("TimberCruisingModel-\(UUID().uuidString)")
         try FileManager.default.createDirectory(

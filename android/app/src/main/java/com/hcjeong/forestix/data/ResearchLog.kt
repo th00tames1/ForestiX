@@ -64,6 +64,8 @@ object ResearchLog {
         // clean one and the analyst could neither flag nor exclude it. Empty on
         // rows with no walk-off (DBH, typed manual heights).
         "tracking_dropped",
+        // Exact attempt join; empty on legacy rows and non-study tools.
+        "measurement_id", "save_event",
     )
 
     private fun file(context: Context): File =
@@ -360,6 +362,7 @@ object ResearchLog {
         val measIdx = COLUMNS.indexOf("measured_value")
         val errIdx = COLUMNS.indexOf("error")
         val unitIdx = COLUMNS.indexOf("truth_unit")
+        val identityIdx = COLUMNS.indexOf("measurement_id")
 
         val rows = ArrayList<TruthUnitRepair.Change>()
         var written = 0
@@ -371,6 +374,7 @@ object ResearchLog {
             // pass writes land where the header says they are.
             while (row.size < COLUMNS.size) row.add("")
             val before = TruthInput.parsePositive(row[truthIdx]) ?: continue
+            if(row[identityIdx].isNotEmpty()){kept.unverifiable++;continue}
             if (row[unitIdx].isNotEmpty()) {
                 kept.unitRecorded++
                 continue

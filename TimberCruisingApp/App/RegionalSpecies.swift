@@ -13,6 +13,7 @@
 // neither shown nor dismissed; "all" = explicitly all-species mode.
 
 import Foundation
+import Models
 
 public enum Region: String, CaseIterable, Identifiable, Sendable {
     case pnwWest    = "pnw_west"
@@ -199,7 +200,7 @@ public enum RegionalSpecies {
     public static func name(forCode code: String) -> String {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return code }
-        return canonicalNames[trimmed.uppercased()] ?? code
+        return SpeciesNameLookup.shared.record(trimmed)?.commonName ?? canonicalNames[trimmed.uppercased()] ?? code
     }
 
     /// Code → common name, built once from all regional presets. First

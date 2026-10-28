@@ -155,8 +155,8 @@ class BreastHeightGuide(private val controller: ArController) {
         if (stage == Stage.PLACED) {
             return placementMarkers(base, height)
         }
-        return listOf(ArSceneMarker(base, MarkerShape.Sphere(0.015f),
-            floatArrayOf(1f, 1f, 1f, 0.45f)))
+        return listOf(ArSceneMarker(base, MarkerShape.Sphere(0.0225f),
+            floatArrayOf(0f, 1f, 1f, 0.95f)))
     }
 
     /// The point the assembly is drawn from: the anchor once placed, the aim
@@ -183,7 +183,7 @@ class BreastHeightGuide(private val controller: ArController) {
             val h = height.meters.toFloat()
             val white = floatArrayOf(1f, 1f, 1f, 0.9f)
             return listOf(
-                ArSceneMarker(base, MarkerShape.Sphere(0.015f), white),
+                ArSceneMarker(base, MarkerShape.Sphere(0.0225f), floatArrayOf(0f, 1f, 1f, 0.95f)),
                 ArSceneMarker(Vec3(base.x, base.y + h / 2f, base.z),
                     MarkerShape.Cylinder(0.004f, h), white),
                 ArSceneMarker(Vec3(base.x, base.y + h, base.z),

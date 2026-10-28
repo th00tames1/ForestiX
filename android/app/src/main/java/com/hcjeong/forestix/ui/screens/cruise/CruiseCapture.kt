@@ -12,8 +12,8 @@
 // QUICK-TALLY LOOP (field-benchmark batch): the cruise DBH screen is a
 // DIAMETER LOOP — each Accept `recordDbh`s, then `advanceTally()` bumps
 // the target to the plot's next tree number and the screen resets to
-// aiming. `undoLastTally()` backs the just-saved row out (hard delete; the
-// screen deletes its photo) and steps the auto number back — the Undo
+// aiming. `undoLastTally()` conditionally deletes a new row or restores a
+// remeasured row, retaining media and journal evidence — the Undo
 // toast's action. Per-tree height on demand runs through `beginHeight()`
 // (tree peek / plot heights sheet): a HEIGHT-ONLY session on an EXISTING
 // Tree row, so the Height screen's cruise branch folds the reading into
@@ -51,6 +51,8 @@ import com.hcjeong.forestix.sensors.ProjectCalibration
 import com.hcjeong.forestix.ui.PendingTreeNumber
 import com.hcjeong.forestix.sensors.DBHMethod
 import java.util.UUID
+import com.hcjeong.forestix.data.fieldstudy.*
+import kotlinx.coroutines.*
 import kotlin.math.PI
 
 object CruiseCapture {
@@ -70,6 +72,9 @@ object CruiseCapture {
         val treeName: String? = null,
         val plotCenterLat: Double,
         val plotCenterLon: Double,
+        val fieldTarget:FieldStudyTarget?=null,
+        val expectedTree:Tree?=null,
+        val nameEdited:Boolean=false,
     ) {
         /// What the tally chrome calls the tree it is ABOUT to write. One
         /// rule, shared with every saved tree's `displayTitle`.
@@ -83,6 +88,9 @@ object CruiseCapture {
     /// The Tree row the DBH leg created — the Height leg updates it.
     @Volatile
     private var savedTreeId: UUID? = null
+    private data class TallyUndo(val operationId:String=newFieldId(),val original:Tree?,var saved:Tree,
+        val fieldTarget:FieldStudyTarget?,val measurementIds:MutableList<String>)
+    private var tallyUndo:TallyUndo?=null
 
     /// What that row is CALLED. Tracked beside the id rather than read back
     /// off `target`, because in the diameter → height chain (F10) the tally
@@ -116,6 +124,7 @@ object CruiseCapture {
             plotCenterLon = plot.centerLon,
         )
         savedTreeId = null
+        tallyUndo = null
         savedTreeName = null
         // Number only, still: the cruise tree's name is written straight onto
         // the Tree row by [recordDbh] below, and the PendingTreeNumber lock is
@@ -137,7 +146,7 @@ object CruiseCapture {
     /// then folds the accepted reading into that row; the Height screen's
     /// cruise branch pops straight back to the map, whose (re)entry runs
     /// `end()`. Same calibration publish as `begin()`.
-    fun beginHeight(env: AppEnvironment, project: Project, plot: Plot, tree: Tree) {
+    fun beginHeight(env: AppEnvironment, project: Project, plot: Plot, tree: Tree,fieldTarget:FieldStudyTarget?=null) {
         target = Target(
             projectId = project.id,
             plotId = plot.id,
@@ -152,7 +161,7 @@ object CruiseCapture {
         )
         savedTreeId = tree.id
         savedTreeName = tree.treeName
-        PendingTreeNumber.set(number = tree.treeNumber)
+        PendingTreeNumber.set(number=tree.treeNumber,name=tree.treeName,plotID=plot.id,fieldTarget=fieldTarget,fieldTargetLocked=true)
         env.activeScanCalibration.value = ProjectCalibration(
             depthNoiseMm = project.depthNoiseMm,
             dbhCorrectionAlpha = project.dbhCorrectionAlpha,
@@ -175,10 +184,13 @@ object CruiseCapture {
     /// still promising on screen. iOS gates it the same way.
     suspend fun advanceTally(env: AppEnvironment, saved: Boolean): Int? {
         val t = target ?: return null
-        val next = t.treeNumber + 1
+        val maximum=runCatching{env.treeRepository.listByPlot(t.plotId,true).maxOfOrNull{it.treeNumber}}.getOrNull()
+            ?:maxOf(t.treeNumber,tallyUndo?.saved?.treeNumber?:0)
+        val next = if(maximum<Int.MAX_VALUE)maximum+1 else Int.MAX_VALUE
         target = t.copy(
             treeNumber = next,
             treeName = if (saved) nextTreeName(env, t.plotId) else t.treeName,
+            fieldTarget=null,expectedTree=null,nameEdited=false,
         )
         return next
     }
@@ -224,26 +236,42 @@ object CruiseCapture {
         return proposed
     }
 
-    /// Undo toast action: HARD-delete the just-saved tally row and step the
-    /// auto number back to it. Returns the deleted Tree (the caller removes
-    /// its photo — MeasurePhotoStore needs an Activity), or null when there
-    /// is nothing to undo / the delete failed.
-    suspend fun undoLastTally(env: AppEnvironment): Tree? {
-        val t = target ?: return null
-        val id = savedTreeId ?: return null
-        val tree = runCatching { env.treeRepository.read(id) }.getOrNull() ?: return null
-        runCatching { env.treeRepository.hardDelete(id) }.getOrElse { return null }
+    /// Restore only the unchanged saved snapshot; never overwrite independent
+    /// edits or delete old media. Throw so a failed Undo remains visible/retryable.
+    suspend fun undoLastTally(env: AppEnvironment) {
+        val t=target?:throw FieldStudyException("missing","Cruise session unavailable")
+        val undo=tallyUndo?.takeIf{it.saved.id==savedTreeId}?:throw FieldStudyException("missing","Undo snapshot unavailable")
+        env.fieldStudy.performInventoryUndo(undo.operationId,undo.saved,undo.original,undo.measurementIds)
         savedTreeId = null
         savedTreeName = null
         target = t.copy(
-            treeNumber = tree.treeNumber,
+            treeNumber = undo.saved.treeNumber,
             // Stepped back with the number, and re-derived from the plot for
             // the same reason: the undone row is gone, so the series resolves
             // to the name that row had. Reusing the name the loop had already
             // advanced to would leave a gap nothing ever fills.
-            treeName = nextTreeName(env, t.plotId),
+            treeName = undo.saved.treeName,fieldTarget=undo.fieldTarget,expectedTree=undo.original?.let(FieldCruiseTreeUpdate::snapshot),nameEdited=false,
         )
-        return tree
+        tallyUndo=null
+    }
+
+    suspend fun prepareFieldTarget(env:AppEnvironment,id:String,origin:Target):Target{
+        env.fieldStudy.awaitPendingWrites();currentCoroutineContext().ensureActive()
+        val study=env.fieldStudy.state.value
+        val selected=study.activeTargets.firstOrNull{it.id==id}
+        if(!study.loaded||study.error!=null||study.issues.isNotEmpty()||!study.configuration.enabled||selected==null)
+            throw FieldStudyException("missing","Study target unavailable")
+        val rows=env.treeRepository.listByPlot(origin.plotId,true)
+        val binding=FieldCruiseTargetBinding.resolve(selected,origin.plotId.toString(),rows.map{FieldInventoryRow(it.id.toString(),it.plotId.toString(),it.treeNumber,it.deletedAt!=null)},study.measurements)
+        val existing=binding.existingRowId?.let{env.treeRepository.readCurrent(UUID.fromString(it))}
+        if(binding.existingRowId!=null&&(existing?.plotId!=origin.plotId||existing?.treeNumber!=binding.treeNumber))
+            throw FieldStudyException("conflict","Inventory scope changed")
+        return origin.copy(treeNumber=binding.treeNumber,treeName=existing?.treeName?:selected.treeId,
+            fieldTarget=selected.copy(attributes=selected.attributes.toMap()),expectedTree=existing?.let(FieldCruiseTreeUpdate::snapshot),nameEdited=false)
+    }
+    fun applyFieldTarget(origin:Target,next:Target){
+        if(target!==origin)throw CancellationException("Cruise scope changed")
+        target=next
     }
 
     /// Tally pill → rename, committed. An emptied field CLEARS the name rather
@@ -256,7 +284,7 @@ object CruiseCapture {
     /// "Plot3-T07" there.
     fun renameTarget(name: String?) {
         val t = target ?: return
-        target = t.copy(treeName = name?.trim()?.takeIf { it.isNotEmpty() })
+        target = t.copy(treeName = name?.trim()?.takeIf { it.isNotEmpty() },nameEdited=true)
     }
 
     /// Disarm (chain finished OR abandoned) and restore the identity
@@ -266,6 +294,7 @@ object CruiseCapture {
         target = null
         savedTreeId = null
         savedTreeName = null
+        tallyUndo=null
         env.activeScanCalibration.value = ProjectCalibration.identity
     }
 
@@ -291,6 +320,10 @@ object CruiseCapture {
         fix: CLLocationSnapshot?,
         /// "auto" | "manual" | "typed" — which estimator found the edges.
         captureMode: String? = null,
+        measurementId:String?=null,
+        fieldTarget:FieldStudyTarget?=null,
+        resultMeasurementId:String?=measurementId,
+        beforeSave:(suspend (Tree,Tree?)->Unit)?=null,
     ): UUID? {
         val t = target ?: return null
         savedTreeId = null
@@ -309,7 +342,7 @@ object CruiseCapture {
                 t.plotCenterLat, t.plotCenterLon, fix.latitude, fix.longitude).toFloat()
         }
         val tree = Tree(
-            id = UUID.randomUUID(),
+            id = resultMeasurementId?.let(UUID::fromString)?:UUID.randomUUID(),
             plotId = t.plotId,
             treeNumber = t.treeNumber,
             // The name the pill was showing when the cruiser accepted. Null is
@@ -365,11 +398,19 @@ object CruiseCapture {
             createdAt = now,
             updatedAt = now,
             deletedAt = null,
+            dbhMeasurementId=resultMeasurementId,
         )
-        env.treeRepository.create(tree)
-        savedTreeId = tree.id
-        savedTreeName = tree.treeName
-        return tree.id
+        val original=t.expectedTree?.let(FieldCruiseTreeUpdate::snapshot)
+        val saved=if(original==null){beforeSave?.invoke(tree,null);env.treeRepository.createIfNumberFree(tree)}else{
+            val patch=FieldCruiseTreeUpdate.dbh(original,tree,speciesCode)
+            val next=if(t.nameEdited)patch.copy(treeName=t.treeName)else patch
+            beforeSave?.invoke(next,original);env.treeRepository.replaceIfUnchanged(next,original)
+        }
+        tallyUndo=TallyUndo(original=original,saved=FieldCruiseTreeUpdate.snapshot(saved),fieldTarget=fieldTarget,
+            measurementIds=listOfNotNull(measurementId).toMutableList())
+        savedTreeId = saved.id
+        savedTreeName = saved.treeName
+        return saved.id
     }
 
     /// Height Accept (cruise session): fold the height leg into the Tree
@@ -387,12 +428,18 @@ object CruiseCapture {
         r: HeightResult,
         photoPath: String?,
         fix: CLLocationSnapshot?,
+        treeId: UUID? = savedTreeId,
+        measurementId:String?=null,
+        resultMeasurementId:String?=measurementId,
+        beforeSave:(suspend (Tree,Tree?)->Unit)?=null,
     ): Boolean {
         if (target == null) return false
-        val tree = savedTreeId
-            ?.let { runCatching { env.treeRepository.read(it) }.getOrNull() }
+        val previous = treeId
+            ?.let { runCatching { env.treeRepository.readCurrent(it) }.getOrNull() }
             ?: return false
+        val tree=FieldCruiseTreeUpdate.snapshot(previous)
         tree.heightM = r.heightM
+        tree.heightMeasurementId=resultMeasurementId
         tree.heightMethod = r.method
         tree.heightSource = "measured"
         tree.heightSigmaM = r.sigmaHm
@@ -406,6 +453,15 @@ object CruiseCapture {
             tree.longitude = fix.longitude
         }
         tree.updatedAt = System.currentTimeMillis()
-        return runCatching { env.treeRepository.update(tree) }.isSuccess
+        return runCatching {
+            beforeSave?.invoke(tree,previous)
+            val saved=env.treeRepository.replaceIfUnchanged(tree,previous)
+            tallyUndo?.takeIf{it.saved==previous}?.let{undo->undo.saved=FieldCruiseTreeUpdate.snapshot(saved)
+                if(measurementId!=null)undo.measurementIds.add(measurementId)}
+        }.isSuccess
     }
+
+    /** Read-only binding for the height leg; the tally target may already
+     * name the NEXT tree by the time height opens. */
+    val heightResultTreeId: UUID? get() = savedTreeId
 }

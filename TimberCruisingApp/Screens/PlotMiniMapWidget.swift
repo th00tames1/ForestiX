@@ -376,9 +376,7 @@ public struct PlotMiniMapWidget: View {
                 if let p = markPlacement(eastM: tree.eastM,
                                          northM: tree.northM)?.pointOnMap {
                     Circle()
-                        .fill(tree.warn
-                              ? ForestixPalette.confidenceWarn
-                              : ForestixPalette.confidenceOk)
+                        .fill(ForestixPalette.primary)
                         .frame(width: 5, height: 5)
                         .position(p)
                 }
@@ -788,8 +786,7 @@ struct PlotMapEnlargedView: View {
                 .fill(casing)
                 .frame(width: 11, height: 11)
             Circle()
-                .fill(tree.warn ? ForestixPalette.confidenceWarn
-                                : ForestixPalette.confidenceOk)
+                .fill(ForestixPalette.primary)
                 .frame(width: 8, height: 8)
             if showLabel {
                 Text(tree.label)

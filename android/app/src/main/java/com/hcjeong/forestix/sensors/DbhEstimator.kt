@@ -53,8 +53,8 @@ data class ProjectCalibration(
 
     /// The published diameter for a raw one — the ONLY place the cylinder
     /// coefficients may be applied, so no call site can forget the check.
-    fun appliedToRawCm(rawCm: Double): Double =
-        if (calibrationIsStale) rawCm
+    fun appliedToRawCm(rawCm: Double, expectedEpoch: Int = DBHEstimator.ESTIMATOR_EPOCH): Double =
+        if ((dbhCorrectionAlpha != 0f || dbhCorrectionBeta != 1f) && dbhCalibrationEpoch != expectedEpoch) rawCm
         else dbhCorrectionAlpha + dbhCorrectionBeta * rawCm
 
     companion object { val identity = ProjectCalibration() }
@@ -130,10 +130,23 @@ class ArDepthFrame(
     /// replayed frame is bit-identical to what the estimator consumed live.
     /// Null in normal operation (zero cost with recording off).
     val rawDepthMm: ShortArray? = null,
-    /// Live-only timing; replay fixtures retain the default and are unchanged.
+    /// Acquisition age is retained by modern replay; historical fixtures
+    /// without recorded clocks keep the default, not an invented sensor time.
     val frameTimestampNanos: Long = 0,
     val depthAgeNanos: Long = 0,
+    val rawDepthEvidence: DbhRawDepthEvidence? = null,
+    val depthDiagnostics: Map<String,String> = emptyMap(),
+    val depthInputPolicy:String=DbhMeasurementDepth.LEGACY_FULL,
 ) {
+    /** Metadata-only wrapper. Original RGB/depth identity and buffers are
+     * unchanged; modern raw evidence already persists depthDiagnostics. */
+    fun withDepthReadiness(assessment:DbhDepthReadiness.Assessment)=ArDepthFrame(
+        width,height,depth,confidence,fx,fy,cx,cy,pose,fxImg,fyImg,depthFromViewAffine,rawDepthMm,
+        frameTimestampNanos,depthAgeNanos,rawDepthEvidence,depthDiagnostics+assessment.diagnostics(),depthInputPolicy
+    ).also{tagged->RawFrameClockRegistry.stamp(this)?.let{
+        RawFrameClockRegistry.register(tagged,it.androidCameraNanos,it.depthSensorNanos)
+    }}
+
     companion object {
         /// Shared u16-mm → (metres, confidence) ingest rule — the SINGLE
         /// definition of how a raw ARCore D_16 sample becomes the float
@@ -255,20 +268,16 @@ object DBHEstimator {
 
     val PLAUSIBLE_DIAMETER_CM = 2.5..300.0
 
-    /// How far the phone may be from the trunk for the tap's depth sample to
-    /// be usable, in METRES. A property of the depth camera, not a preference:
-    /// closer than half a metre the sensor has nothing to triangulate, further
-    /// than three the per-pixel depth noise swamps a stem's curvature. Named so
-    /// the guard and the recovery sentence read it from one place. iOS
-    /// `DBHEstimator.usableTapDepthM` 1:1.
-    val USABLE_TAP_DEPTH_M = 0.5f..3.0f
+    /// Android DBH admission range, shared by Auto, Adjust and recovery text.
+    /// Being in range is necessary, not a guarantee of accurate depth.
+    val USABLE_TAP_DEPTH_M = DbhDepthInputPolicy.distanceRangeM
 
     /// How far behind the near face the middle-half depth median sits, as a
     /// fraction of the radius: 1 - sqrt(15)/4. iOS `medianDepthOffsetFactor`.
     val MEDIAN_DEPTH_OFFSET_FACTOR = 1.0 - sqrt(15.0) / 4.0
 
-    /// Historical middle-half inversion, not the live full-span estimator.
-    /// Live measurement uses BoundaryAlignment.fullSpanDiameterCm instead.
+    /// Historical middle-half inversion, not the live central-80% estimator.
+    /// Live measurement uses BoundaryAlignment.sampledDiameterCm instead.
     /// A stem's diameter from the width of its silhouette — iOS
     /// `DBHEstimator.silhouetteDiameterCm` parity, same derivation, same
     /// constants. Keep the two in step.
@@ -358,6 +367,10 @@ object DBHEstimator {
     /// Full §7.1 pipeline. Returns null only if the burst is too small.
     fun estimate(input: DbhScanInput): DBHResult? {
         if (input.frames.size != 1 && input.frames.size < 5) return null
+        if(input.frames.any{it.depthInputPolicy!=DbhMeasurementDepth.LEGACY_FULL})
+            return red("This experimental arc replay does not support qualified Raw Depth. Use the chord estimator.")
+        if (input.frames.any { !DbhDepthInputPolicy.acceptsFrame(it) })
+            return red("Depth has not updated. Wait for a fresh depth frame and retry.")
         val lastFrame = input.frames.last()
 
         val dTap = medianDepth(input.tapX, input.tapY, lastFrame, radius = 2)
@@ -367,8 +380,7 @@ object DBHEstimator {
             // range" half echoed the depth sample under the crosshair, which
             // a cruiser cannot act on.
             //
-            // THE GATE IS UNCHANGED and stays metric — it is the depth
-            // camera's usable range, not a preference. Only the wording
+            // The admission window stays metric. Only the wording
             // follows the cruiser's units, and it is built from the same
             // constant the guard tests, so the sentence cannot come to quote a
             // range the check no longer applies.
@@ -468,7 +480,7 @@ object DBHEstimator {
 
         // Step 10: cylinder calibration.
         val dbhRawCm = 2 * r * 100
-        val dbhCm = cal.appliedToRawCm(dbhRawCm)
+        val dbhCm = cal.appliedToRawCm(dbhRawCm,DbhMeasurementDepth.calibrationEpoch(input.frames[0].depthInputPolicy))
 
         return DBHResult(
             diameterCm = dbhCm.toFloat(),
@@ -564,6 +576,7 @@ object DBHEstimator {
         /// midpoint back-projected, pushed one radius behind the surface) —
         /// the overlay cylinder's anchor. Null when no fit.
         val centerWorld: Vec3? = null,
+        val depthRejection:String? = null,
     )
 
     /// Per-frame chord fit + the strip extent it was read from.
@@ -582,7 +595,7 @@ object DBHEstimator {
         /// translucent cylinder overlay on the SAME fit the bar is drawn
         /// from. Null when unavailable.
         val centerWorld: Vec3? = null,
-        /// Spatial depth statistic used by the full-span silhouette geometry.
+        /// Spatial depth statistic used by the central-80% silhouette geometry.
         /// Legacy depth-band fits leave this null and retain their tap depth.
         val sampledDepthM: Double? = null,
     )
@@ -596,6 +609,7 @@ object DBHEstimator {
         val chord: FrameChord?,
         val borderClippedRows: Int = 0,
         val cleanWidths: List<Int> = emptyList(),
+        val depthRejection: String? = null,
     )
 
     /// Rows that must have run off the border for a failed frame to be
@@ -619,13 +633,21 @@ object DBHEstimator {
         ChordAlgorithm.DEPTH_BAND -> {
             val tapAlong = tapAlongAxis(tapX, tapY, axis)
             val strip = extractGuideStemStrip(frame, axis, tapAlong, dTap, 0.15f, cal.depthDiscontinuityM)
-            val chordFit = if (strip.size < 6) null else {
-                val pts = strip.map { idx ->
+            val profile=if(DbhMeasurementDepth.usesRaw(frame.depthInputPolicy)&&strip.size>=6)
+                DbhMeasurementDepth.measurementProfile(frame,axis,strip.min().toDouble(),strip.max().toDouble())else null
+            val chordFit = if (strip.size < 6 || (DbhMeasurementDepth.usesRaw(frame.depthInputPolicy)&&profile?.qualified!=true)) null else {
+                val pts = strip.mapNotNull { idx ->
                     val (px, py) = pixelCoords(axis, idx)
-                    BackProjection.worldXZ(px.toDouble(), py.toDouble(), frame.depthAt(px, py).toDouble(),
+                    val z=if(DbhMeasurementDepth.usesRaw(frame.depthInputPolicy)){
+                        val raw=frame.rawDepthEvidence?:return@mapNotNull null;val p=py*frame.width+px
+                        val mm=raw.millimeters[p].toInt()and 65535
+                        if((raw.confidence[p].toInt()and 255)<DbhMeasurementDepth.MIN_CONFIDENCE||mm !in 500..5000)return@mapNotNull null
+                        mm/1000.0
+                    }else frame.depthAt(px,py).toDouble()
+                    BackProjection.worldXZ(px.toDouble(), py.toDouble(), z,
                         frame.fx, frame.fy, frame.cx, frame.cy, frame.pose)
                 }
-                val chord = chordDiameterFromCloud(pts)
+                val chord = if(pts.size>=6)chordDiameterFromCloud(pts)else 0.0
                 if (chord > 0.0) {
                     val extent = axisExtent(frame, axis).toFloat().coerceAtLeast(1f)
                     FrameChord(chord, strip.min() / extent, strip.max() / extent,
@@ -820,10 +842,11 @@ object DBHEstimator {
         if (extentL < 0 || extentR < 0) return FrameScan(null, clippedRows, ownWidths)
         // Neighbouring rows grade edge consistency only. Read the same actual
         // measurement-row span shown by the overlay, exactly as Adjust/AI do.
-        val sampled = BoundaryAlignment.fullSpanSample(
-            axisExtent(frame, axis), extentL.toDouble(), extentR.toDouble(), focal,
-        ) { idx -> val (x,y)=pixelCoords(axis,idx);frame.depthAt(x,y).toDouble() }
-            ?: return FrameScan(null, clippedRows, ownWidths)
+        val sampled = DbhMeasurementDepth.sample(frame,axis,extentL.toDouble(),extentR.toDouble(),focal)
+            ?: return FrameScan(null, clippedRows, ownWidths,
+                depthRejection=if(DbhMeasurementDepth.usesRaw(frame.depthInputPolicy))DbhMeasurementDepth.RETRY_MESSAGE else null)
+        if (!DbhDepthInputPolicy.acceptsDistance(sampled.second))
+            return FrameScan(null, clippedRows, ownWidths)
         val diameterM = sampled.first / 100.0
         // Width consistency across the row stack — iOS chordPreviewFit's
         // tier input (CoV ≤ 0.10 ⇒ green preview chip).
@@ -892,8 +915,9 @@ object DBHEstimator {
         /// Clean-row widths from the previous 1–2 ticks (rolling quorum).
         carryWidths: List<Int> = emptyList(),
     ): DbhPreview? {
+        if (!DbhDepthInputPolicy.acceptsFrame(frame)) return null
         val dTap = dTapOverrideM ?: medianDepth(tapX, tapY, frame, 2) ?: return null
-        if (dTap !in 0.4f..3.5f) return DbhPreview(0f, dTap, false, 0)
+        if (dTap !in USABLE_TAP_DEPTH_M) return DbhPreview(0f, dTap, false, 0)
         val scan = frameChordDiameterM(frame, tapX, tapY, axis, dTap, cal, algorithm, carryWidths)
         val chord = scan.chord
             ?: return DbhPreview(
@@ -902,9 +926,10 @@ object DBHEstimator {
                 clippedRows = scan.borderClippedRows,
                 cleanRows = scan.cleanWidths.size,
                 cleanWidths = scan.cleanWidths,
+                depthRejection = scan.depthRejection,
             )
         val locked = chord.diameterM in 0.025..2.0
-        val dia = cal.appliedToRawCm(chord.diameterM * 100).toFloat()
+        val dia = cal.appliedToRawCm(chord.diameterM * 100,DbhMeasurementDepth.calibrationEpoch(frame.depthInputPolicy)).toFloat()
         // Preview tier — width consistency, iOS chordPreviewFit parity:
         // CoV ≤ 0.10 ⇒ green (chip shown); otherwise yellow (silent).
         val tier = if (chord.widthCov != null && chord.widthCov <= 0.10) {
@@ -1168,6 +1193,13 @@ object DBHEstimator {
         guideViewY: Float,
     ): Double? {
         val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
+        if(DbhMeasurementDepth.usesRaw(frame.depthInputPolicy)){
+            val extent=if(span.axis is GuideAxis.Col)frame.height else frame.width
+            val profile=DbhMeasurementDepth.measurementProfile(frame,span.axis,span.leftFraction*extent,span.rightFraction*extent)
+            if(!profile.qualified)return null
+            val values=profile.values.filter{it.isFinite()}.sorted()
+            return values[(values.size*3)/4]-values[values.size/4]
+        }
         val g = bracketGeometry(frame, span.axis, span.leftFraction, span.rightFraction)
             ?: return null
         val depths = bracketCoreDepthsSorted(frame, span.axis, g.iLo, g.iHi)
@@ -1197,10 +1229,21 @@ object DBHEstimator {
         guideViewY: Float,
         cal: ProjectCalibration,
     ): DbhPreview? {
+        if (!DbhDepthInputPolicy.acceptsFrame(frame)) return null
         val span = bracketDepthGeometry(frame, leftViewX, rightViewX, guideViewY) ?: return null
-        val fit = bracketChordFit(frame, span.axis, span.leftFraction, span.rightFraction)
+        if(DbhMeasurementDepth.usesRaw(frame.depthInputPolicy)){
+            val extent=if(span.axis is GuideAxis.Col)frame.height else frame.width
+            val profile=DbhMeasurementDepth.measurementProfile(frame,span.axis,span.leftFraction*extent,span.rightFraction*extent)
+            if(!profile.qualified)return DbhPreview(0f,0f,false,profile.supportedPixels,
+                depthRejection=DbhMeasurementDepth.RETRY_MESSAGE)
+            val z=profile.medianM
+            if(z!=null&&!DbhDepthInputPolicy.acceptsDistance(z))return DbhPreview(0f,z.toFloat(),false,profile.supportedPixels)
+        }
+        val fit = bracketFitBeforeDistanceGate(frame, span.axis, span.leftFraction, span.rightFraction)
             ?: return null
-        val dia = cal.appliedToRawCm(fit.diameterCm).toFloat()
+        if (!DbhDepthInputPolicy.acceptsDistance(fit.depthM))
+            return DbhPreview(0f, fit.depthM.toFloat(), locked = false, nPoints = fit.spanPx)
+        val dia = cal.appliedToRawCm(fit.diameterCm,DbhMeasurementDepth.calibrationEpoch(frame.depthInputPolicy)).toFloat()
         // A returned fit IS capturable (the user vouches for the edges) —
         // iOS tap-gate parity. nPoints carries the bracket span in
         // walk-axis px (iOS PreviewFit.inlierCount).
@@ -1219,18 +1262,28 @@ object DBHEstimator {
     /// guide line. `silhouetteDiameterCm` inverts the tangent form on that
     /// pair. Returns the RAW (un-calibrated) diameter (cm), the span rounded
     /// to whole pixels, and the depth the fit read — or null on the same
-    /// gates iOS uses (bracket depth 0.3–5 m, raw diameter within
+    /// Android admission gates (bracket depth 0.5–5 m, raw diameter within
     /// PLAUSIBLE_DIAMETER_CM).
     ///
     /// Fractions, not view pixels, because that is what the raw-capture
     /// manifest stores: view-independent, byte-identical to the iOS bracket
     /// schema, so replaying a bundle needs neither view size nor guide_y.
     ///
-    /// Both platforms use the guide-axis focal component and the full-span
+    /// Both platforms use the guide-axis focal component and the central-80%
     /// median with the corresponding cylindrical surface correction.
     data class BracketFit(val diameterCm: Double, val spanPx: Int, val depthM: Double)
 
     fun bracketChordFit(
+        frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
+    ): BracketFit? {
+        if (!DbhDepthInputPolicy.acceptsFrame(frame)) return null
+        return bracketFitBeforeDistanceGate(frame, guideAxis, leftFraction, rightFraction)
+            ?.takeIf { DbhDepthInputPolicy.acceptsDistance(it.depthM) }
+    }
+
+    // The unchanged spatial calculation can still describe a too-close
+    // preview's distance, without creating a capturable DBH value.
+    private fun bracketFitBeforeDistanceGate(
         frame: ArDepthFrame, guideAxis: GuideAxis, leftFraction: Double, rightFraction: Double,
     ): BracketFit? {
         val g = bracketGeometry(frame, guideAxis, leftFraction, rightFraction) ?: return null
@@ -1239,15 +1292,13 @@ object DBHEstimator {
             is GuideAxis.Col -> frame.fy
         }
         if (focal <= 1.0) return null
-        // Epoch 7: shared full-span median and paired surface correction.
+        // Epoch 9: shared central-80% median and matching surface correction.
         val col = guideAxis is GuideAxis.Col
         val width = if (col) frame.height else frame.width
         val height = if (col) frame.width else frame.height
         val fixed = when (guideAxis) { is GuideAxis.Row -> guideAxis.y; is GuideAxis.Col -> guideAxis.x }
         if (fixed !in 0 until height) return null
-        val (rawCm,z) = BoundaryAlignment.fullSpanSample(width,g.lo*width,g.hi*width,focal) { x ->
-            frame.depthAt(if(col)fixed else x,if(col)x else fixed).toDouble()
-        } ?: return null
+        val (rawCm,z) = DbhMeasurementDepth.sample(frame,guideAxis,g.lo*width,g.hi*width,focal) ?: return null
         if (rawCm !in PLAUSIBLE_DIAMETER_CM) return null
         return BracketFit(rawCm, Math.round(g.widthPx).toInt(), z.toDouble())
     }
@@ -1264,11 +1315,17 @@ object DBHEstimator {
         rightFraction: Double,
         cal: ProjectCalibration,
     ): DBHResult? {
+        if (!DbhDepthInputPolicy.acceptsWindow(frames)) return null
         if (frames.size == 1) {
+            if(DbhMeasurementDepth.usesRaw(frames.first().depthInputPolicy)){
+                val f=frames.first();val extent=if(guideAxis is GuideAxis.Col)f.height else f.width
+                if(!DbhMeasurementDepth.measurementProfile(f,guideAxis,leftFraction*extent,rightFraction*extent).qualified)
+                    return redChord(DbhMeasurementDepth.RETRY_MESSAGE,0)
+            }
             val fit = bracketChordFit(frames.first(), guideAxis, leftFraction, rightFraction)
                 ?: return null
             return DBHResult(
-                diameterCm = cal.appliedToRawCm(fit.diameterCm).toFloat(),
+                diameterCm = cal.appliedToRawCm(fit.diameterCm,DbhMeasurementDepth.calibrationEpoch(frames.first().depthInputPolicy)).toFloat(),
                 centerX = 0f, centerZ = 0f, arcCoverageDeg = 0f,
                 rmseMm = 0f, sigmaRmm = 0f, nInliers = fit.spanPx,
                 confidence = ConfidenceTier.YELLOW,
@@ -1296,7 +1353,7 @@ object DBHEstimator {
         val medianRawCm = diameters[diameters.size / 2]
         val mean = diameters.average()
         val cov = if (mean > 0) (diameters.last() - diameters.first()) / mean else 1.0
-        val diaCm = cal.appliedToRawCm(medianRawCm)
+        val diaCm = cal.appliedToRawCm(medianRawCm,DbhMeasurementDepth.calibrationEpoch(frames.first().depthInputPolicy))
         return DBHResult(
             diameterCm = diaCm.toFloat(), centerX = 0f, centerZ = 0f,
             arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -1315,10 +1372,13 @@ object DBHEstimator {
         frames: List<ArDepthFrame>, tapX: Double, tapY: Double, axis: GuideAxis, cal: ProjectCalibration,
         algorithm: ChordAlgorithm = ChordAlgorithm.SILHOUETTE,
     ): DBHResult? {
+        if (!DbhDepthInputPolicy.acceptsWindow(frames))
+            return redChord("Depth has not updated. Wait for a fresh depth frame and retry.", 0)
         if (frames.size == 1) {
             val p = livePreview(frames.first(), tapX, tapY, axis, cal, algorithm)
                 ?: return null
-            if (!p.locked) return redChord("Cannot resolve both trunk edges in this frame", p.nPoints)
+            if (!p.locked) return redChord(p.depthRejection?:if(DbhMeasurementDepth.usesRaw(frames.first().depthInputPolicy))
+                DbhMeasurementDepth.RETRY_MESSAGE else "Cannot resolve both trunk edges in this frame", p.nPoints)
             return DBHResult(
                 diameterCm = p.diameterCm, centerX = 0f, centerZ = 0f,
                 arcCoverageDeg = 0f, rmseMm = 0f, sigmaRmm = 0f,
@@ -1332,8 +1392,8 @@ object DBHEstimator {
         val last = frames.last()
         val dTap = medianDepth(tapX, tapY, last, 2)
             ?: return redChord("Trunk surface not seen at the crosshair", 0)
-        if (dTap !in 0.4f..3.5f)
-            return redChord("Stand 0.4–3.5 m from the trunk and capture again.", 0)
+        if (dTap !in USABLE_TAP_DEPTH_M)
+            return redChord("Stand 0.5–5 m from the trunk and capture again.", 0)
 
         val diameters = ArrayList<Double>(frames.size)
         var clippedFrames = 0
@@ -1356,7 +1416,7 @@ object DBHEstimator {
         val mean = diameters.average()
         val sd = sqrt(diameters.sumOf { (it - mean) * (it - mean) } / diameters.size)
         val cov = if (mean > 0) sd / mean else 1.0
-        val diaCm = cal.appliedToRawCm(medianM * 100).toFloat()
+        val diaCm = cal.appliedToRawCm(medianM * 100,DbhMeasurementDepth.calibrationEpoch(frames.first().depthInputPolicy)).toFloat()
 
         val checks = listOf(
             check(medianM in 0.025..2.0, Severity.REJECT, "Diameter outside 2.5–200 cm"),

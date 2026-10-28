@@ -97,18 +97,6 @@ struct RawCaptureOutcomePill: View {
 
 // MARK: - Dev-block notice
 
-/// Shown in the developer block when Developer mode is on but raw capture is
-/// off: the field session is producing NO corpus, which is exactly the thing
-/// you don't want to discover at the end of the day.
-struct RawCaptureOffNotice: View {
-    var body: some View {
-        Text("Raw capture OFF — nothing is being recorded (Settings › Developer)")
-            .font(ForestixType.caption)
-            .foregroundStyle(ForestixPalette.confidenceWarn)
-            .accessibilityIdentifier("rawCapture.offNotice")
-    }
-}
-
 // MARK: - Truth field helpers
 
 /// Inline warning under a typed ground-truth field: a value outside the

@@ -36,9 +36,7 @@ public struct LocaleSetupSheet: View {
     private var countryStep: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: ForestixSpace.lg) {
-                intro(
-                    title: "Where are you cruising?",
-                    detail: "Sets your units and volume standard. Change it any time in Settings.")
+                intro(title: "Where are you cruising?")
                 VStack(spacing: ForestixSpace.sm) {
                     ForEach(Country.allCases) { country in
                         LocaleRow(
@@ -77,9 +75,7 @@ public struct LocaleSetupSheet: View {
     private func regionStep(for country: Country) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: ForestixSpace.lg) {
-                intro(
-                    title: "Pick your region",
-                    detail: "Loads the right species list and log rule for your region. Change it any time in Settings.")
+                intro(title: "Pick your region")
                 VStack(spacing: ForestixSpace.sm) {
                     ForEach(country.regions) { region in
                         LocaleRow(
@@ -132,16 +128,10 @@ public struct LocaleSetupSheet: View {
 
     // MARK: - Bits
 
-    private func intro(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: ForestixSpace.xs) {
+    private func intro(title: String) -> some View {
             Text(title)
                 .font(ForestixType.bodyBold)
                 .foregroundStyle(ForestixPalette.textPrimary)
-            Text(detail)
-                .font(ForestixType.caption)
-                .foregroundStyle(ForestixPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private func regionGlyph(_ region: Region) -> String {

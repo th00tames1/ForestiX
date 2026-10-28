@@ -88,7 +88,8 @@ object CSVExporter {
 
     /// Emit one row per Tree, in `treeNumber` order, including soft-deleted
     /// rows (with `deleted_at` populated) so the CSV is a lossless dump.
-    fun treesCSV(trees: List<Tree>): String {
+    fun treesCSV(trees: List<Tree>, species: List<com.hcjeong.forestix.data.cruise.SpeciesConfig> = emptyList()): String {
+        val speciesByCode = species.associateBy { it.code }
         val header = listOf(
             "id", "plot_id", "tree_number", "tree_name", "species_code", "status",
             "dbh_cm", "dbh_method", "dbh_capture_mode",
@@ -101,7 +102,8 @@ object CSVExporter {
             "crown_class", "damage_codes",
             "is_multistem", "parent_tree_id",
             "notes", "photo_path", "raw_scan_path",
-            "created_at", "updated_at", "deleted_at",
+            "created_at", "updated_at", "deleted_at", "dbh_measurement_id", "height_measurement_id",
+            "species_common_name", "species_scientific_name",
         ).joinToString(",")
         val lines = mutableListOf(header)
         val sorted = trees.sortedWith(
@@ -145,6 +147,9 @@ object CSVExporter {
             cells.add(iso8601(t.createdAt))
             cells.add(iso8601(t.updatedAt))
             cells.add(t.deletedAt?.let { iso8601(it) } ?: "")
+            cells.add(quote(t.dbhMeasurementId?:""));cells.add(quote(t.heightMeasurementId?:""))
+            cells.add(quote(speciesByCode[t.speciesCode]?.commonName ?: ""))
+            cells.add(quote(speciesByCode[t.speciesCode]?.scientificName ?: ""))
             lines.add(cells.joinToString(","))
         }
         return join(lines)

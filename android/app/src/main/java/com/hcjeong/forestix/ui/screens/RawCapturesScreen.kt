@@ -48,12 +48,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.data.cruise.DBHEpochRecompute
 import com.hcjeong.forestix.sensors.DBHEstimator
 import com.hcjeong.forestix.sensors.RawCaptureReplay
 import com.hcjeong.forestix.sensors.RawCaptureStore
+import com.hcjeong.forestix.sensors.RawCapturePresentation
+import com.hcjeong.forestix.sensors.RawCaptureExportAvailability
+import com.hcjeong.forestix.data.fieldstudy.FieldStudyExportApplication
 import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.screens.project.FormDivider
 import com.hcjeong.forestix.ui.screens.project.FormSection
@@ -72,10 +76,9 @@ private const val REL_TOL = 1e-3
 /// The ZIP holds every bundle, including ones the field log has moved on from.
 /// Byte-identical to the iOS sibling (RawCapturesScreen.corpusCompletenessNotice).
 private const val CORPUS_COMPLETENESS_NOTICE =
-    "Export ZIP is the COMPLETE corpus, not the field log: a bundle whose " +
-        "reading was deleted or retaken is still in it, and a ground truth " +
-        "the field log has since corrected keeps its original value here. " +
-        "Nothing is filtered out."
+    "Raw ZIP contains every raw bundle, including retaken or deleted readings. " +
+        "Complete field-study ZIP also includes measurement UUIDs, reference observations, " +
+        "elapsed times, protocol snapshots, application results and an integrity audit."
 
 /// Minimum scored captures before the ranking table dares to crown a winner
 /// (shared with the replay engine so both platforms use the same floor).
@@ -165,6 +168,7 @@ fun RawCapturesScreen(nav: NavController) {
     var clearConfirm by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var exportError by remember { mutableStateOf<String?>(null) }
+    var exportNotice by remember { mutableStateOf<String?>(null) }
 
     // PREVIEW-THEN-COMMIT over the cruise diameters. Nothing here decides
     // anything — the rule, the tolerance and the skip reasons are
@@ -292,17 +296,30 @@ fun RawCapturesScreen(nav: NavController) {
                     CORPUS_COMPLETENESS_NOTICE,
                     style = type.caption, color = colors.textSecondary,
                 )
+                SettingsActionRowLocal(title=if(exporting)"Exporting…"else"Complete field-study ZIP",icon=Icons.Filled.IosShare,
+                    enabled=!exporting,tint=colors.primary){
+                    if(!env.fieldStudy.state.value.loaded)exportError="Field-study archive is still loading. Retry shortly."
+                    else{
+                        exporting=true;exportError=null;exportNotice=null
+                        scope.launch{try{
+                            val artifact=FieldStudyExportApplication.build(context,env)
+                            exportNotice="Exported ${artifact.report.measurementCount} attempts and ${artifact.report.rawBundleCount} raw bundles. Integrity issues: ${artifact.report.issues.size}. See audit.json."
+                            shareFile(context,FieldStudyExportApplication.uri(context,artifact),"application/zip")
+                        }catch(e:Exception){exportError=e.message?:"Export failed."}finally{exporting=false}}
+                    }
+                }
                 SettingsActionRowLocal(
-                    title = if (exporting) "Exporting…" else "Export ZIP",
+                    title = if (exporting) "Exporting…" else "Raw ZIP (sensor files only)",
                     icon = Icons.Filled.IosShare,
                     // Unreadable bundles are still on disk and still exportable
                     // — the ZIP is the only way to get their bytes off the
                     // phone, so it must not be greyed out when they are all
                     // that is left.
-                    enabled = (summaries.isNotEmpty() || inventory.unparseable > 0) && !exporting,
+                    enabled = RawCaptureExportAvailability.canExportRaw(inventory,exporting),
                     tint = colors.primary,
                 ) {
                     exporting = true
+                    exportError = null;exportNotice = null
                     scope.launch {
                         // A failed export used to be a silent no-op — the
                         // corpus looked exportable and simply never left the
@@ -318,10 +335,12 @@ fun RawCapturesScreen(nav: NavController) {
                 SettingsActionRowLocal(
                     title = "Clear all",
                     icon = Icons.Filled.Delete,
-                    enabled = summaries.isNotEmpty() || inventory.unparseable > 0,
+                    enabled = (summaries.isNotEmpty() || inventory.unparseable > 0) && !exporting,
                     tint = colors.confidenceBad,
                 ) { clearConfirm = true }
             }
+
+            exportNotice?.let{notice->Text(notice,style=type.caption,color=colors.textSecondary)}
 
             // Re-run-all error summary.
             rerunSummary?.let { s ->
@@ -544,6 +563,7 @@ private fun CaptureRow(s: RawCaptureStore.Summary, onClick: () -> Unit) {
             val head = buildString {
                 append(s.kind.uppercase(Locale.US))
                 s.liveValue?.let { append("  ").append(fmt(it)).append(" ").append(s.unit) }
+                    ?: append(" · No valid measurement")
                 s.treeNumber?.let { append("  · Tree ").append(it) }
             }
             Text(head, style = type.body, color = colors.textPrimary)
@@ -621,6 +641,8 @@ private fun RawCaptureDetail(
     onBack: () -> Unit,
     onTruthSaved: () -> Unit,
 ) {
+    val env=LocalAppEnvironment.current
+    val settings by env.settings.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val colors = Forestix.colors
@@ -670,7 +692,9 @@ private fun RawCaptureDetail(
             }
 
             FormSection(header = "Original vs re-run vs truth") {
-                SummaryLine("Live (recorded)", data.liveValue?.let { "${fmt(it)} ${data.unit}" } ?: "—")
+                SummaryLine(if(data.usesExactEvidence)"Displayed measurement"else"Legacy recorded result",
+                    data.liveValue?.let { "${fmt(it)} ${data.unit}" } ?: "No valid measurement")
+                if(data.usesExactEvidence)SummaryLine("Canonical fit (separate)",data.canonicalValue?.let{"${fmt(it)} ${data.unit}"}?:"—")
                 SummaryLine("Re-run (current)", data.rerunValue?.let { "${fmt(it)} ${data.unit}" } ?: "—")
                 if (data.kind == "height") {
                     SummaryLine("Re-run (reposed d_h)",
@@ -709,7 +733,7 @@ private fun RawCaptureDetail(
                 if (data.kind == "height") TruthInput.Quantity.HEIGHT
                 else TruthInput.Quantity.DIAMETER
             val consoleUnit = TruthInput.defaultUnit(consoleQuantity, imperial = false)
-            FormSection(
+            if(settings.developerMode&&data.allowsTruth)FormSection(
                 header = "Ground truth (${data.unit})",
                 footer = "Persists into the bundle manifest; used as the reference in " +
                     "Re-run comparisons. Blank or unreadable input is never saved — " +
@@ -760,6 +784,7 @@ private fun RawCaptureDetail(
                                 // the value is not in any manifest yet — the
                                 // console reaches finished bundles, so this is
                                 // the belt-and-braces branch.
+                                if(!env.settings.state.value.developerMode){truthStatus="Ground-truth editing requires developer mode.";return@launch}
                                 when (RawCaptureStore.setTruth(context, id, v, consoleUnit)) {
                                     RawCaptureStore.TruthWrite.SAVED -> {
                                         truthStatus = "Truth saved."
@@ -802,7 +827,7 @@ private fun RawCaptureDetail(
         }
     }
 
-    if (clearTruthConfirm) {
+    if (clearTruthConfirm&&settings.developerMode) {
         AlertDialog(
             onDismissRequest = { clearTruthConfirm = false },
             title = { Text("Remove the stored ground truth?") },
@@ -813,6 +838,7 @@ private fun RawCaptureDetail(
                     scope.launch {
                         // A clear carries no unit — there is no longer a typed
                         // value for one to describe.
+                        if(!env.settings.state.value.developerMode){truthStatus="Ground-truth editing requires developer mode.";return@launch}
                         truthStatus = when (RawCaptureStore.setTruth(context, id, null, null)) {
                             RawCaptureStore.TruthWrite.SAVED -> "Truth cleared."
                             RawCaptureStore.TruthWrite.QUEUED ->
@@ -841,6 +867,9 @@ private data class DetailData(
     val mode: String,
     val treeNumber: Int?,
     val liveValue: Double?,
+    val canonicalValue: Double?,
+    val usesExactEvidence: Boolean,
+    val allowsTruth: Boolean,
     val selfStatus: String?,
     val truthValue: Double?,
     val rerunValue: Double?,
@@ -862,6 +891,7 @@ private fun loadDetail(context: android.content.Context, id: String): DetailData
     val truth = m.optJSONObject("truth")
     val self = m.optJSONObject("replay_selfcheck")
     val ctx = m.optJSONObject("context")
+    val presentation = RawCapturePresentation.from(m.toString())
 
     var rerun: Double? = null
     var reposed: Double? = null
@@ -887,7 +917,10 @@ private fun loadDetail(context: android.content.Context, id: String): DetailData
         device = m.optString("device"),
         mode = ctx?.optString("mode") ?: "quick",
         treeNumber = ctx?.optInt("tree_number", -1)?.takeIf { it >= 0 },
-        liveValue = res?.optDouble("value")?.takeIf { !it.isNaN() },
+        liveValue = presentation.displayedValue,
+        canonicalValue = presentation.canonicalValue,
+        usesExactEvidence = presentation.usesExactEvidence,
+        allowsTruth = presentation.allowsTruth,
         selfStatus = self?.optString("status")?.takeIf { it.isNotEmpty() },
         truthValue = truth?.optDouble("value")?.takeIf { !it.isNaN() },
         rerunValue = rerun,

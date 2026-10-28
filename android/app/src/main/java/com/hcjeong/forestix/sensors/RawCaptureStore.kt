@@ -1,9 +1,9 @@
 // Raw-capture STORE — writes and manages the replay bundles. Each bundle is
 // a directory filesDir/raw-captures/<uuid>/ holding manifest.json plus, for
-// DBH, the raw depth grids (depth_0..N.bin, native u16 mm, little-endian,
+// DBH, the raw depth grids (depth_0..N.bin, native u16 mm or f32 metres, little-endian,
 // row-major) and one reference rgb_0.jpg. The manifest schema is LOCKED and
 // key-identical with the iOS sibling (platform "android", depth format
-// "u16mm") so the two platforms' bundles pool for the cross-platform
+// "u16mm" or unquantized "f32m") so the two platforms' bundles pool for the cross-platform
 // accuracy study.
 //
 // Recording is developer-mode + tc.rawCaptureEnabled only, fired at the end
@@ -24,11 +24,10 @@ import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.positioning.CLLocationSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,6 +85,10 @@ object RawCaptureStore {
         val error: String?,
         val queuedTruthSaved: TruthEntry? = null,
         val queuedTruthLost: TruthEntry? = null,
+        val replayValue: Double? = null,
+        val replayStatus: String? = null,
+        val aiEvidenceStatus:String? = null,
+        val aiEvidenceReason:String? = null,
     ) {
         val saved: Boolean get() = id != null && error == null
     }
@@ -98,24 +101,11 @@ object RawCaptureStore {
     /// behind the cruiser's back.
     data class TruthEntry(val value: Double, val unit: TruthInput.Unit)
 
-    /// Result of a truth write. QUEUED is NOT durable — the value sits in the
-    /// pending queue until the in-flight bundle write folds it in, so a caller
-    /// must keep the operator's typed text until it sees SAVED.
+    /// QUEUED confirms a durable operator sidecar, not a completed raw bundle.
+    /// Keep the typed text until the recorder confirms the manifest is SAVED.
     enum class TruthWrite { SAVED, QUEUED, FAILED }
 
-    /// Truth / acceptance typed BEFORE the async bundle write finished.
-    /// Held here and folded into the manifest by the recorder itself, so a
-    /// fast Accept can never drop a hand-measured value (the old code only
-    /// wrote truth when lastRecordedBundleID already existed).
-    private class PendingEdit {
-        var truth: Double? = null
-        var truthUnit: TruthInput.Unit? = null
-        var hasTruth: Boolean = false
-        var accepted: Boolean = false
-    }
-
-    private val pendingLock = Any()
-    private val pending = HashMap<String, PendingEdit>()
+    internal val pendingLock = Any()
 
     /// Mint a bundle id SYNCHRONOUSLY at capture time. The scan screen holds
     /// this id immediately, so Accept can attach truth to a bundle whose
@@ -157,12 +147,11 @@ object RawCaptureStore {
     data class PoseSample(val tMs: Long, val pose: FloatArray)
 
     /// Optional per-aim capture for a schema-2 height bundle: the AR depth
-    /// frame grabbed AT the base/top tap (its rawDepthMm u16 grid + intrinsics
-    /// are what get serialized) and the reference RGB JPEG bytes captured at
-    /// the same instant. Either half may be null — a null frame (or a frame
-    /// with no armed raw depth) leaves the aim block schema-1-shaped, and
-    /// replay falls back to the tangent method exactly as before.
-    data class HeightAim(val frame: ArDepthFrame?, val rgb: ByteArray?)
+    /// frame grabbed AT the base/top tap and its reference RGB JPEG bytes.
+    /// Either half may be null. A missing native u16 buffer uses the actual
+    /// float depth without quantization; RGB does not depend on depth existing.
+    /// Tangent replay remains independent of these optional attachments.
+    data class HeightAim(val frame: ArDepthFrame?, val rgb: ByteArray?,val imageMetadata:RawCapturedImage?=null)
 
     // MARK: - Directory
 
@@ -175,7 +164,8 @@ object RawCaptureStore {
 
     /// Serialize one DBH burst under the id the caller already minted
     /// (newBundleId), so an Accept racing this write still lands its truth.
-    /// `frames` must carry rawDepthMm (recorder armed); `rgb` is the
+    /// `frames` retain their original order; missing rawDepthMm uses f32m.
+    /// `rgb` is the
     /// reference JPEG grabbed at BURST START by the scan screen (iOS parity —
     /// the old post-burst background grab often pointed elsewhere or came
     /// back null). Returns a RecordOutcome that always says why a bundle did
@@ -193,22 +183,30 @@ object RawCaptureStore {
         unitSystem: String,            // "metric" | "imperial"
         ctx: CaptureContext,
         rgb: ByteArray?,
-    ): RecordOutcome = withContext(Dispatchers.IO) {
-        val raw = frames.filter { it.rawDepthMm != null }.take(MAX_FRAMES)
-        if (raw.size < MIN_FRAMES) {
+        referenceImageMetadata:RawCapturedImage? = null,
+        captureEvidence: RawCaptureEvidence? = null,
+        aiRequest:RawAIWriteRequest? = null,
+    ): RecordOutcome {
+        try { return withContext(Dispatchers.IO) {
+        val raw = frames
+        if (raw.size !in MIN_FRAMES..MAX_FRAMES) {
             return@withContext RecordOutcome(
-                null, 0, "no raw depth frames in this burst", queuedTruthLost = dropPending(id))
+                null, 0, "unsupported depth frame count: ${raw.size} (expected $MIN_FRAMES..$MAX_FRAMES)",
+                queuedTruthLost = pendingTruthOf(context,id))
         }
         val free = freeSpaceBytes(context)
         if (free < MIN_FREE_BYTES) {
             return@withContext RecordOutcome(
-                null, 0, lowStorageReason(free), queuedTruthLost = dropPending(id))
+                null, 0, lowStorageReason(free), queuedTruthLost = pendingTruthOf(context,id))
         }
         val dir = bundleDir(context, id)
-        dir.mkdirs()
+        try{RawCaptureWriteGuard.claim(dir,id,"dbh")}catch(e:Exception){
+            return@withContext RecordOutcome(null,0,e.message?:"Raw writer claim failed",queuedTruthLost=pendingTruthOf(context,id))}
         try {
+            require(raw.map{it.depthInputPolicy}.distinct().size==1){"Mixed measurement depth policies"}
+            if(raw.any{it.depthInputPolicy!=DbhMeasurementDepth.LEGACY_FULL})require(captureEvidence!=null){"Qualified depth requires original evidence"}
             // 1) Raw depth grids.
-            raw.forEachIndexed { i, f -> writeU16Le(File(dir, "depth_$i.bin"), f.rawDepthMm!!) }
+            val storedGrids=raw.mapIndexed { i, f -> RawDepthGridIO.write(f,dir,"depth_$i.bin") }
             // 2) One reference RGB, captured by the caller at burst start.
             //    Best-effort — a miss just leaves rgb_file null.
             val haveRgb = try {
@@ -225,10 +223,10 @@ object RawCaptureStore {
             val algorithm = ChordAlgorithm.fromRaw(algorithmRaw)
             val bracketGeom = if (bracket != null) deriveBracket(raw.first(), bracket) else null
             if (bracket != null && bracketGeom == null) {
-                dir.deleteRecursively()
+                val reason="bracket geometry couldn't be mapped to the depth frame"
                 return@withContext RecordOutcome(
-                    null, 0, "bracket geometry couldn't be mapped to the depth frame",
-                    queuedTruthLost = dropPending(id))
+                    null, 0, reason+" · partial raw files retained",
+                    queuedTruthLost = preserveFailedBundle(context,id,reason))
             }
             val effTapX: Double
             val effTapY: Double
@@ -294,11 +292,13 @@ object RawCaptureStore {
                 fo.put("depth_file", "depth_$i.bin")
                 fo.put("width", f.width)
                 fo.put("height", f.height)
-                fo.put("format", "u16mm")
+                fo.put("format", storedGrids[i].format)
+                fo.put("confidence_file", storedGrids[i].confidenceFile)
                 fo.put("fx", f.fx); fo.put("fy", f.fy)
                 fo.put("cx", f.cx); fo.put("cy", f.cy)
                 fo.put("tap_px", JSONArray().put(effTapX).put(effTapY))
                 fo.put("axis", effAxisStr)
+                fo.put("depth_input_policy",f.depthInputPolicy)
                 fo.put("camera_pose", floatArr(f.pose))
                 fo.put("view_to_depth", floatArr(f.depthFromViewAffine ?: IDENTITY_AFFINE))
                 framesArr.put(fo)
@@ -315,18 +315,123 @@ object RawCaptureStore {
             dbhBlock.put("rgb_file", if (haveRgb) "rgb_0.jpg" else JSONObject.NULL)
             manifest.put("dbh", dbhBlock)
             manifest.put("height", JSONObject.NULL)
+            manifest.put("measurement_id",id)
+            manifest.getJSONObject("settings").put("dbh_depth_input_policy",raw.first().depthInputPolicy)
+            manifest.getJSONObject("settings").put("dbh_depth_calibration_epoch",DbhMeasurementDepth.calibrationEpoch(raw.first().depthInputPolicy))
+            val depthComparisons=ArrayList<DbhDepthComparisonIO.Input>()
+            var evidence = captureEvidence
+            if(evidence!=null){
+                require(evidence.measurementId==id&&frames.size<=32){"Capture evidence identity/count"}
+                if(frames.any{it.depthInputPolicy!=DbhMeasurementDepth.LEGACY_FULL})evidence=evidence.copy(version=2)
+                evidence=evidence.copy(frames=frames.mapIndexed{i,f->
+                    val recorded=RawCaptureEvidenceIO.writeFrame(f,"dbh_$i",dir)
+                    val axis=if(effAxisStr=="row")GuideAxis.Row(Math.round(effTapY).toInt())else GuideAxis.Col(Math.round(effTapX).toInt())
+                    val p=if(bracketGeom==null)DBHEstimator.livePreview(f,effTapX,effTapY,axis,cal,algorithm)else null
+                    val left=bracketGeom?.leftFrac?:p?.stripLeftFraction?.toDouble()
+                    val right=bracketGeom?.rightFrac?:p?.stripRightFraction?.toDouble()
+                    val support=if(left!=null&&right!=null)DbhRawDepthSupport.assess(f,axis,left,right)else null
+                    val comparison=buildMap<String,String>{
+                        put("raw_comparison_policy","diagnostic_only_v1")
+                        put("raw_comparison_status",support?.status?:"boundary_unavailable")
+                        support?.let{s->
+                            put("raw_supported_pixels",s.supportedPixels.toString());put("raw_sampled_pixels",s.sampledPixels.toString())
+                            s.pairedDifferenceM?.let{put("raw_full_paired_difference_m",it.toString())}
+                            s.rawMedianM?.let{put("raw_supported_median_m",it.toString())}
+                            s.fullPairedMedianM?.let{put("full_supported_median_m",it.toString())}
+                        }
+                        if(DbhMeasurementDepth.usesRaw(f.depthInputPolicy)&&left!=null&&right!=null){
+                            val extent=if(axis is GuideAxis.Col)f.height else f.width
+                            val selected=DbhMeasurementDepth.measurementProfile(f,axis,left*extent,right*extent)
+                            put("measurement_depth_status",selected.status)
+                            put("measurement_supported_pixels",selected.supportedPixels.toString())
+                            put("measurement_candidate_pixels",selected.candidatePixels.toString())
+                            put("measurement_axis_samples",selected.supportedAxisSamples.toString())
+                            selected.medianM?.let{put("measurement_sample_depth_m",it.toString())}
+                            selected.diameterCm?.let{put("measurement_raw_diameter_cm",it.toString())}
+                            selected.rawInformationAgeNanos?.let{put("raw_information_age_ns",it.toString())}
+                        }
+                    }
+                    val geometry=if(left!=null&&right!=null)DbhDepthComparisonIO.Geometry(axis,left,right)else null
+                    val annotated=DbhDepthComparisonIO.annotate(recorded.copy(depthDiagnostics=recorded.depthDiagnostics+comparison),geometry)
+                    depthComparisons.add(DbhDepthComparisonIO.Input(f,annotated,geometry))
+                    annotated
+                })
+                evidence=evidence.copy(images=listOfNotNull(RawCaptureEvidenceIO.attachImage(referenceImageMetadata,rgb,
+                    if(haveRgb)"rgb_0.jpg"else null,"dbh_reference",dir)))
+                val aiRecorded=aiRequest?.write(dir)
+                if(aiRecorded!=null)evidence=evidence.copy(aiInference=aiRecorded.inference,aiEvidenceStatus=aiRecorded.status,aiEvidenceReason=aiRecorded.reason)
+                // Round-trip metadata and all original bytes, not confidence reconstructed from depth.
+                evidence=RawCaptureEvidence.parse(evidence.json().toString())
+                manifest.put("capture_evidence",JSONObject(evidence.json().toString()))
+                evidence=evidence.noteReplay(RawCaptureReplay.rerunCapturedDbh(dir,manifest))
+                manifest.put("capture_evidence",JSONObject(evidence.json().toString()))
+            }
 
             // 5) Reproducibility self-check — reload from disk, re-run.
             val rerun = try { RawCaptureReplay.rerunDbh(dir, manifest)?.value } catch (_: Throwable) { null }
             manifest.put("replay_selfcheck",
                 selfCheckJson(liveRes?.diameterCm?.toDouble(), rerun, null))
+            writeDepthComparison(dir,id,manifest,depthComparisons,cal)
 
             val foldedTruth = writeManifest(id, dir, manifest)
-            RecordOutcome(id, raw.size, null, queuedTruthSaved = foldedTruth)
+            RecordOutcome(id, raw.size, null, queuedTruthSaved = foldedTruth,replayValue=evidence?.replayValue,replayStatus=evidence?.replayStatus,
+                aiEvidenceStatus=evidence?.aiEvidenceStatus,aiEvidenceReason=evidence?.aiEvidenceReason)
         } catch (t: Throwable) {
-            dir.deleteRecursively()
+            val reason=writeFailureReason(context,t)
             RecordOutcome(
-                null, 0, writeFailureReason(context, t), queuedTruthLost = dropPending(id))
+                null, 0, reason+" · partial raw files retained", queuedTruthLost = preserveFailedBundle(context,id,reason))
+        }
+        } } finally { aiRequest?.cancel() }
+    }
+
+    suspend fun recordRefusedAttempt(context:Context,id:String,cal:ProjectCalibration,units:String,ctx:CaptureContext,
+                                evidence:RawCaptureEvidence,aiRequest:RawAIWriteRequest,
+                                snapshot:ArDepthFrame?=null,reference:RawCameraJPEG?=null,
+                                comparisonBracket:BracketSpec?=null):RecordOutcome {
+        try{return withContext(Dispatchers.IO){
+        var ownsWrite=false
+        try{
+            require(evidence.measurementId==id&&!evidence.displayedResult.valid&&evidence.attemptFailureReason!=null){"Refused attempt identity"}
+            val free=freeSpaceBytes(context);if(free<MIN_FREE_BYTES)return@withContext RecordOutcome(null,0,lowStorageReason(free))
+            val dir=bundleDir(context,id);RawCaptureWriteGuard.claim(dir,id,"attempt_only");ownsWrite=true
+            val recorded=aiRequest.write(dir)
+            val images=reference?.let { listOfNotNull(RawCaptureEvidenceIO.attachImage(it.metadata,it.data,null,"shutter_reference",dir)) }
+            val comparisonGeometry=snapshot?.let{f->comparisonBracket?.let{deriveBracket(f,it)}}?.let{
+                DbhDepthComparisonIO.Geometry(it.axis,it.leftFrac,it.rightFrac)}
+            val stored=evidence.copy(aiInference=recorded.inference,aiEvidenceStatus=recorded.status,aiEvidenceReason=recorded.reason,
+                version=if(snapshot?.depthInputPolicy?.let(DbhMeasurementDepth::usesRaw)==true)2 else evidence.version,
+                frames=snapshot?.let{listOf(DbhDepthComparisonIO.annotate(RawCaptureEvidenceIO.writeFrame(it,"shutter_refused",dir),comparisonGeometry))}?:evidence.frames,
+                images=images?:evidence.images)
+            val manifest=JSONObject().put("schema",SCHEMA).put("platform","android").put("device",Build.MODEL)
+                .put("app_commit",appCommit(context)).put("created_at",iso8601()).put("kind","dbh").put("measurement_id",id)
+                .put("context",contextJson(ctx)).put("settings",settingsJson("not_measured",units,"attempt_only",cal))
+                .put("result_live",resultLiveJson(0.0,0.0,"red",false,0,emptyList()))
+                .put("truth",truthJson(null,null,null)).put("gps",gpsJson(ctx.gps)).put("dbh",JSONObject.NULL).put("height",JSONObject.NULL)
+                .put("capture_evidence",JSONObject(stored.json().toString()))
+                .put("replay_selfcheck",JSONObject().put("status","not_applicable").put("rerun_value",JSONObject.NULL).put("delta",JSONObject.NULL))
+            if(snapshot!=null){
+                writeDepthComparison(dir,id,manifest,listOf(DbhDepthComparisonIO.Input(snapshot,stored.frames.single(),comparisonGeometry)),cal)
+            }
+            val truth=writeManifest(id,dir,manifest)
+            if(recorded.status=="saved"||((snapshot!=null||evidence.depthDiagnostics!=null)&&recorded.status in listOf("not_requested","no_inference")))RecordOutcome(id,if(snapshot==null)0 else 1,null,queuedTruthSaved=truth)
+            else RecordOutcome(null,0,"AI attempt input ${recorded.status}: ${recorded.reason?:"unavailable"}")
+        }catch(e:Exception){val reason=e.message?:"Attempt evidence write failed"
+            RecordOutcome(null,0,reason+if(ownsWrite)" · partial raw files retained"else"",
+                queuedTruthLost=if(ownsWrite)preserveFailedBundle(context,id,reason)else pendingTruthOf(context,id))}
+        }}finally{aiRequest.cancel()}
+    }
+
+    /** Experimental comparison must not stop the original input/result from
+     * being saved. Failure is explicit, never a different measurement. */
+    internal fun writeDepthComparison(dir:File,id:String,manifest:JSONObject,inputs:List<DbhDepthComparisonIO.Input>,cal:ProjectCalibration){
+        if(inputs.isEmpty())return
+        try{
+            val descriptor=DbhDepthComparisonIO.write(dir,id,inputs,cal)
+            manifest.put("dbh_depth_comparison",JSONObject(descriptor.toString()))
+            manifest.put("dbh_depth_comparison_status","saved")
+        }catch(e:Exception){
+            manifest.put("dbh_depth_comparison_status","failed")
+            manifest.put("dbh_depth_comparison_error",e.javaClass.simpleName)
         }
     }
 
@@ -354,14 +459,16 @@ object RawCaptureStore {
         ctx: CaptureContext,
         baseAim: HeightAim? = null,
         topAim: HeightAim? = null,
+        captureEvidence: RawCaptureEvidence? = null,
     ): RecordOutcome = withContext(Dispatchers.IO) {
         val free = freeSpaceBytes(context)
         if (free < MIN_FREE_BYTES) {
             return@withContext RecordOutcome(
-                null, 0, lowStorageReason(free), queuedTruthLost = dropPending(id))
+                null, 0, lowStorageReason(free), queuedTruthLost = pendingTruthOf(context,id))
         }
         val dir = bundleDir(context, id)
-        dir.mkdirs()
+        try{RawCaptureWriteGuard.claim(dir,id,"height")}catch(e:Exception){
+            return@withContext RecordOutcome(null,0,e.message?:"Raw writer claim failed",queuedTruthLost=pendingTruthOf(context,id))}
         try {
             val manifest = JSONObject()
             manifest.put("schema", SCHEMA)
@@ -436,6 +543,20 @@ object RawCaptureStore {
             }
             heightBlock.put("pose_samples", samplesArr)
             manifest.put("height", heightBlock)
+            manifest.put("measurement_id",id)
+            var evidence=captureEvidence
+            if(evidence!=null){
+                require(evidence.measurementId==id){"Capture evidence identity"}
+                evidence=evidence.copy(frames=listOf("base" to baseAim?.frame,"top" to topAim?.frame).mapNotNull{(role,f)->
+                    f?.let{RawCaptureEvidenceIO.writeFrame(it,role,dir)}})
+                evidence=evidence.copy(images=listOfNotNull(
+                    RawCaptureEvidenceIO.attachImage(baseAim?.imageMetadata,baseAim?.rgb,baseJson.optString("rgb_file").takeIf{it.isNotEmpty()&&it!="null"},"base",dir),
+                    RawCaptureEvidenceIO.attachImage(topAim?.imageMetadata,topAim?.rgb,topJson.optString("rgb_file").takeIf{it.isNotEmpty()&&it!="null"},"top",dir)))
+                evidence=RawCaptureEvidence.parse(evidence.json().toString())
+                manifest.put("capture_evidence",JSONObject(evidence.json().toString()))
+                evidence=evidence.noteReplay(RawCaptureReplay.rerunCapturedHeight(manifest))
+                manifest.put("capture_evidence",JSONObject(evidence.json().toString()))
+            }
 
             // Self-check + the pose-reposed re-derivation (rerun_value_reposed,
             // iOS parity): both re-run HeightEstimator.estimate from disk.
@@ -449,11 +570,11 @@ object RawCaptureStore {
             manifest.optJSONObject("result_live")?.put("frame_count", aimFrames)
 
             val foldedTruth = writeManifest(id, dir, manifest)
-            RecordOutcome(id, aimFrames, null, queuedTruthSaved = foldedTruth)
+            RecordOutcome(id, aimFrames, null, queuedTruthSaved = foldedTruth,replayValue=evidence?.replayValue,replayStatus=evidence?.replayStatus)
         } catch (t: Throwable) {
-            dir.deleteRecursively()
+            val reason=writeFailureReason(context,t)
             RecordOutcome(
-                null, 0, writeFailureReason(context, t), queuedTruthLost = dropPending(id))
+                null, 0, reason+" · partial raw files retained", queuedTruthLost = preserveFailedBundle(context,id,reason))
         }
     }
 
@@ -480,6 +601,7 @@ object RawCaptureStore {
         /// Raw depth frames actually stored (DBH bundles). Null for height /
         /// pre-frame_count bundles.
         val frameCount: Int?,
+        val allowsLegacyInference: Boolean = true,
     )
 
     fun list(context: Context): List<Summary> {
@@ -493,20 +615,22 @@ object RawCaptureStore {
             val resObj = m.optJSONObject("result_live")
             val truthObj = m.optJSONObject("truth")
             val selfObj = m.optJSONObject("replay_selfcheck")
+            val presentation = RawCapturePresentation.from(m.toString())
             Summary(
                 id = d.name,
                 kind = kind,
                 createdAt = m.optString("created_at"),
                 treeNumber = ctxObj?.optInt("tree_number", -1)?.takeIf { it >= 0 },
                 mode = ctxObj?.optString("mode") ?: "quick",
-                liveValue = resObj?.optDouble("value")?.takeIf { !it.isNaN() },
+                liveValue = presentation.displayedValue,
                 unit = if (kind == "height") "m" else "cm",
-                tier = resObj?.optString("tier")?.takeIf { it.isNotEmpty() },
+                tier = presentation.tier,
                 truthValue = truthObj?.optDouble("value")?.takeIf { !it.isNaN() },
                 truthUnit = truthObj?.optString("truth_unit")?.takeIf { it.isNotEmpty() },
                 selfCheckStatus = selfObj?.optString("status")?.takeIf { it.isNotEmpty() },
                 frameCount = resObj?.optInt("frame_count", -1)?.takeIf { it >= 0 }
                     ?: m.optJSONObject("dbh")?.optJSONArray("frames")?.length(),
+                allowsLegacyInference = m.isNull("measurement_id") && m.isNull("capture_evidence"),
             )
         }.sortedByDescending { it.createdAt }
     }
@@ -573,16 +697,7 @@ object RawCaptureStore {
     /// The WHOLE read-modify-write runs under pendingLock (see setTruth).
     suspend fun markAccepted(context: Context, id: String): Boolean =
         withContext(Dispatchers.IO) {
-            synchronized(pendingLock) {
-                val file = manifestFile(context, id)
-                if (!file.exists()) {
-                    pending.getOrPut(id) { PendingEdit() }.accepted = true
-                    return@synchronized true
-                }
-                val m = manifestOf(context, id) ?: return@synchronized false
-                applyAccepted(m)
-                writeQuietly(file, m)
-            }
+            try{RawOperatorEditJournal.update(bundleDir(context,id),id,accepted=true);true}catch(_:Exception){false}
         }
 
     /// Persist an operator-entered ground truth into a bundle's manifest.
@@ -609,25 +724,11 @@ object RawCaptureStore {
         unit: TruthInput.Unit?,
     ): TruthWrite =
         withContext(Dispatchers.IO) {
-            synchronized(pendingLock) {
-                val file = manifestFile(context, id)
-                if (!file.exists()) {
-                    pending.getOrPut(id) { PendingEdit() }.also {
-                        it.truth = value
-                        it.truthUnit = if (value != null) unit else null
-                        it.hasTruth = true
-                    }
-                    return@synchronized TruthWrite.QUEUED
-                }
-                val m = manifestOf(context, id) ?: return@synchronized TruthWrite.FAILED
-                m.put("truth", truthJson(
-                    value,
-                    if (value != null) iso8601() else null,
-                    if (value != null) unit else null,
-                ))
-                if (writeQuietly(file, m)) TruthWrite.SAVED else TruthWrite.FAILED
-            }
+            try{if(RawOperatorEditJournal.update(bundleDir(context,id),id,RawOperatorEditJournal.truth(value,if(value!=null)unit?.raw else null)))
+                TruthWrite.SAVED else TruthWrite.QUEUED}catch(_:Exception){TruthWrite.FAILED}
         }
+
+    fun recoverPendingOperatorEdits(context:Context):List<RawOperatorRecoveryIssue> = RawOperatorEditJournal.recover(root(context))
 
     /// Re-base a stored truth that was typed in imperial and stored as if it
     /// were the metric base — TruthUnitRepair's write into a bundle.
@@ -658,6 +759,7 @@ object RawCaptureStore {
             val file = manifestFile(context, id)
             if (!file.exists()) return@synchronized false
             val m = manifestOf(context, id) ?: return@synchronized false
+            if(!m.isNull("measurement_id")||!m.isNull("capture_evidence")||File(bundleDir(context,id),"pending_patch.json").exists())return@synchronized false
             val truth = m.optJSONObject("truth") ?: return@synchronized false
             if (truth.optString("truth_unit").isNotEmpty()) return@synchronized false
             val stored = truth.optDouble("value")
@@ -727,15 +829,7 @@ object RawCaptureStore {
     /// the caller's failure path reports it as lost instead of eating it.
     private fun writeManifest(id: String, dir: File, manifest: JSONObject): TruthEntry? =
         synchronized(pendingLock) {
-            val edit = pending.remove(id)
-            if (edit != null) applyPending(manifest, edit)
-            try {
-                writeAtomic(File(dir, "manifest.json"), manifest.toString())
-            } catch (t: Throwable) {
-                if (edit != null) pending[id] = edit
-                throw t
-            }
-            edit?.let { truthEntryOf(it) }
+            truthEntryOf(RawOperatorEditJournal.commitRecorder(dir,id,manifest.toString()))
         }
 
     /// Temp file + rename. `writeText` truncates in place, so a crash (or a
@@ -748,7 +842,7 @@ object RawCaptureStore {
         java.io.FileOutputStream(tmp).use { out ->
             out.write(text.toByteArray(Charsets.UTF_8))
             out.flush()
-            runCatching { out.fd.sync() }
+            out.fd.sync()
         }
         if (tmp.renameTo(file)) return
         // Fallback for volumes that refuse rename-onto-existing. The ORIGINAL
@@ -775,45 +869,30 @@ object RawCaptureStore {
         false
     }
 
-    private fun applyPending(manifest: JSONObject, edit: PendingEdit) {
-        if (edit.hasTruth) {
-            manifest.put(
-                "truth",
-                truthJson(
-                    edit.truth,
-                    if (edit.truth != null) iso8601() else null,
-                    edit.truthUnit,
-                ),
-            )
-        }
-        if (edit.accepted) applyAccepted(manifest)
+    /// Return uncommitted typed input without deleting its durable sidecar.
+    private fun pendingTruthOf(context:Context,id:String):TruthEntry? {
+        return try{truthEntryOf(RawOperatorEditJournal.pendingTruth(bundleDir(context,id),id))}catch(_:Exception){null}
     }
 
-    /// The queued value + its typed unit, or null when the edit carried no
-    /// truth (or was an explicit clear). A truth with no unit tag cannot be
-    /// handed back to a field without guessing its scale, so it is reported as
-    /// "nothing to hand back" rather than assumed metric.
-    private fun truthEntryOf(edit: PendingEdit): TruthEntry? {
-        if (!edit.hasTruth) return null
-        val v = edit.truth ?: return null
-        val u = edit.truthUnit ?: return null
-        return TruthEntry(v, u)
+    private fun truthEntryOf(truth:JsonObject?):TruthEntry?{
+        val value=truth?.get("value")?.takeUnless{it==JsonNull}?.jsonPrimitive?.doubleOrNull?:return null
+        val raw=truth["truth_unit"]?.takeUnless{it==JsonNull}?.jsonPrimitive?.content?:return null
+        val unit=TruthInput.Unit.entries.firstOrNull{it.raw==raw}?:return null
+        return TruthEntry(value,unit)
     }
 
-    private fun applyAccepted(manifest: JSONObject) {
-        val res = manifest.optJSONObject("result_live") ?: return
-        res.put("operator_accepted", true)
-        res.put("accepted", true)          // legacy mirror (older readers)
-    }
-
-    /// Discard a bundle's queued edits after its write failed, RETURNING the
-    /// ground truth that died with it (null when none was queued, or when the
-    /// queued edit was an explicit clear). The caller must surface it — a
-    /// queued truth thrown away in silence is exactly the invisible loss this
-    /// whole path exists to prevent.
-    private fun dropPending(id: String): TruthEntry? {
-        val edit = synchronized(pendingLock) { pending.remove(id) } ?: return null
-        return truthEntryOf(edit)
+    /** Never erase a failed field capture, even if the failure note itself
+     * cannot be written. Return uncommitted input to the UI as before. */
+    internal fun preserveFailedBundle(context:Context,id:String,reason:String):TruthEntry?=synchronized(pendingLock){
+        val dir=bundleDir(context,id)
+        if(dir.isDirectory)try{
+            val note=JSONObject().put("schema",1).put("measurement_id",id).put("status","partial_write_failed")
+                .put("created_at",iso8601()).put("reason",reason)
+            val sidecar=File(dir,"pending_patch.json")
+            if(sidecar.isFile)note.put("pending_edit",JSONObject(sidecar.readText()))
+            writeAtomic(File(dir,"write_failure.json"),note.toString())
+        }catch(_:Exception){/* Preserve existing bytes even with no space for the note. */}
+        pendingTruthOf(context,id)
     }
 
     /// Human-readable reason for a failed write — a full disk is the one the
@@ -964,35 +1043,27 @@ object RawCaptureStore {
         )
     }
 
-    /// Serialize a height aim's depth grid (native u16-mm, little-endian,
-    /// row-major — identical byte layout to the DBH depth grids) + reference
-    /// RGB into the bundle, and add the schema-2 aim keys to `json`:
-    /// depth_file, rgb_file, width, height, format, fx, fy, cx, cy — the SAME
-    /// key names iOS writes (the depth FORMAT string stays platform-specific,
-    /// "u16mm"). No-op (no keys added) when the frame or its armed raw depth is
-    /// absent, so the aim block stays schema-1-shaped and tangent replay is
-    /// unaffected.
-    /// Returns true when a depth grid was actually attached (false = the aim
-    /// block stays schema-1-shaped), so the caller can report how many aim
-    /// frames a bundle really carries.
+    /// Attach the independently available depth/confidence and RGB. Native
+    /// u16 bytes are retained; f32m is a lossless fallback, not a conversion
+    /// to synthetic millimetres. Returns the actual depth attachment count.
     private fun attachAimFrame(
         dir: File, aim: HeightAim?, depthName: String, rgbName: String, json: JSONObject,
     ): Boolean {
-        val frame = aim?.frame ?: return false
-        val raw = frame.rawDepthMm ?: return false
-        if (raw.size != frame.width * frame.height) return false
-        writeU16Le(File(dir, depthName), raw)
+        aim ?: return false
         var haveRgb = false
         aim.rgb?.let { bytes ->
             haveRgb = try {
                 if (bytes.isNotEmpty()) { File(dir, rgbName).writeBytes(bytes); true } else false
             } catch (_: Throwable) { false }
         }
-        json.put("depth_file", depthName)
         json.put("rgb_file", if (haveRgb) rgbName else JSONObject.NULL)
+        val frame = aim.frame ?: return false
+        val stored=RawDepthGridIO.write(frame,dir,depthName)
+        json.put("depth_file", depthName)
+        json.put("confidence_file", stored.confidenceFile)
         json.put("width", frame.width)
         json.put("height", frame.height)
-        json.put("format", "u16mm")
+        json.put("format", stored.format)
         json.put("fx", frame.fx)
         json.put("fy", frame.fy)
         json.put("cx", frame.cx)
@@ -1030,9 +1101,4 @@ object RawCaptureStore {
         return fmt.format(Date())
     }
 
-    private fun writeU16Le(file: File, shorts: ShortArray) {
-        val buf = ByteBuffer.allocate(shorts.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        buf.asShortBuffer().put(shorts)
-        file.writeBytes(buf.array())
-    }
 }

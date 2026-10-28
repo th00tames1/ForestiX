@@ -35,4 +35,32 @@ final class DBHCaptureWindowTests: XCTestCase {
     func testIncompleteWindowIsNotSilentlyTreatedAsSingleFrame() {
         XCTAssertNil(measure((0..<4).map { _ in frame() }))
     }
+
+    func testDistanceAdmissionIncludesHalfMetreAndFiveMetres() {
+        XCTAssertEqual(DBHEstimator.usableTapDepthM, 0.5...5.0)
+        for z in [0.5, 1.0, 4.0, 5.0] {
+            XCTAssertTrue(DBHEstimator.isUsableDepthM(z))
+            XCTAssertNotNil(measure([frame(Float(z))]))
+        }
+        for z in [0.0, 0.499, 5.001, Double.nan, Double.infinity] {
+            XCTAssertFalse(DBHEstimator.isUsableDepthM(z))
+            XCTAssertNil(measure([frame(Float(z))]))
+        }
+    }
+
+    func testDeveloperBurstCannotAcceptOnlyOutOfRangeFrames() {
+        for z: Float in [0.499, 5.001] {
+            let result = measure((0..<5).map { _ in frame(z) })
+            XCTAssertTrue(result == nil || result?.confidence == .red)
+        }
+    }
+
+    func testAdmittedSingleFrameGeometryIsUnchanged() throws {
+        for z: Float in [0.5, 1.0, 4.0, 5.0] {
+            let result = try XCTUnwrap(measure([frame(z)]))
+            let expected = try XCTUnwrap(BoundaryAlignment.sampledDiameterCm(
+                spanPx: 0.3 * 256, medianDepthM: Double(z), focalPx: 210))
+            XCTAssertEqual(Double(result.diameterCm), expected, accuracy: 0.0001)
+        }
+    }
 }

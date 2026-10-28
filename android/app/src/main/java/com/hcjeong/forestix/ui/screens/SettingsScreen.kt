@@ -105,6 +105,10 @@ fun SettingsScreen(nav: NavController) {
     val settings by env.settings.state.collectAsStateWithLifecycle()
     val colors = Forestix.colors
     val type = Forestix.type
+    var fieldStudySettingsOpen by remember { mutableStateOf(false) }
+    if (fieldStudySettingsOpen) FieldStudySettingsSheet { fieldStudySettingsOpen = false }
+    var speciesOpen by remember { mutableStateOf(false) }
+    if (speciesOpen) SpeciesSettingsSheet(onDismiss = { speciesOpen = false })
 
     // Bumped after research-CSV clear / danger-zone erase so the row
     // count and button enablement re-read the backing stores.
@@ -219,8 +223,6 @@ fun SettingsScreen(nav: NavController) {
             // and the US-only Log-rule override, in dependency order).
             FormSection(
                 header = "Region & units",
-                footer = "Sets your units, species list, and volume standard. The US " +
-                    "uses board-foot log rules; elsewhere is cubic metres.",
             ) {
                 MenuPickerRow(
                     title = "Country",
@@ -276,10 +278,6 @@ fun SettingsScreen(nav: NavController) {
                             ) { Text(label, style = type.caption, maxLines = 1) }
                         }
                     }
-                    Text(
-                        "Display DBH, height and distance in metric or imperial.",
-                        style = type.caption, color = colors.textSecondary,
-                    )
                 }
                 // Log rule — US only (board-foot is a North-America concept;
                 // metric countries express volume in m³ and hide this). Placed
@@ -292,15 +290,13 @@ fun SettingsScreen(nav: NavController) {
                             value = settings.logRule.displayName,
                             options = LogRule.entries.map { it.displayName },
                         ) { index -> env.settings.setLogRule(LogRule.entries[index]) }
-                        Text(
-                            "Sets board-foot volume from DBH and height. Scribner (West), " +
-                                "Doyle (East), or International ¼″ (most accurate).",
-                            style = type.caption, color = colors.textSecondary,
-                        )
                     }
                 }
             }
 
+            FormSection(header = "Species") {
+                TextButton(onClick = { speciesOpen = true }, modifier = Modifier.fillMaxWidth()) { Text("Browse species") }
+            }
             // MARK: - 2. Display (Appearance segmented, Light → Dark — the map
             // home's retired sun/moon chrome button, relocated; LOCKED strings,
             // iOS parity).
@@ -314,13 +310,9 @@ fun SettingsScreen(nav: NavController) {
                                 onClick = { env.settings.setBreastHeightGuideHeight(height) },
                                 shape = SegmentedButtonDefaults.itemShape(
                                     index = index, count = BreastHeightGuideHeight.entries.size),
-                            ) { Text(height.metricLabel, style = type.caption, maxLines = 1) }
+                            ) { Text(height.label(settings.unitSystem), style = type.caption, maxLines = 1) }
                         }
                     }
-                    Text(
-                        "Vertical height above the selected point.",
-                        style = type.caption, color = colors.textSecondary,
-                    )
                 }
                 FormDivider()
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -345,8 +337,6 @@ fun SettingsScreen(nav: NavController) {
             // Strings and the stored key are identical on iOS.
             FormSection(
                 header = "Measuring",
-                footer = "After you accept a diameter in cruise, Height opens for " +
-                    "the same tree. Skip returns to the tally.",
             ) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -362,32 +352,10 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
 
-            // MARK: - 3. Calibration (navigation row, iOS NavigationLink)
-            FormSection(
-                header = "Calibration",
-                footer = "Scan a flat wall, then a round post you have measured. " +
-                    "This tells Forestix how far off your phone's depth sensor runs, " +
-                    "so diameters come out right. Do both before your first cruise.",
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().clickableNoRipple { nav.navigate(Routes.CALIBRATION) },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Run Calibration", style = type.body, color = colors.textPrimary,
-                        modifier = Modifier.weight(1f))
-                    Icon(
-                        Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null,
-                        tint = colors.textTertiary, modifier = Modifier.size(14.dp))
-                }
-            }
-
             // MARK: - 4. Data & backup (.tcproj export/restore; per-project
             // PDF/CSV/GeoJSON exports live on each project's own screen).
             FormSection(
                 header = "Data & backup",
-                footer = "Saves every project, photo, and scan to a .tcproj file you can " +
-                    "restore on this device. Per-project PDF, CSV and GeoJSON exports live " +
-                    "on each project's screen.",
             ) {
                 SettingsActionRow(
                     title = if (backupBusy) "Working…" else "Export backup",
@@ -407,6 +375,12 @@ fun SettingsScreen(nav: NavController) {
             // not developer tooling. Content unchanged — still a disclosure,
             // still folded by default because the built-in satellite base
             // works with nothing set.
+            FormSection(header = "Tools") {
+                TextButton(onClick = { fieldStudySettingsOpen = true }) {
+                    Text("Field study")
+                }
+                TextButton(onClick = { nav.navigate(Routes.REFERENCE_LIBRARY) }) { Text("Reference & formulas") }
+            }
             FormSection(header = "Advanced") {
                 var basemapExpanded by remember { mutableStateOf(false) }
                 Row(
@@ -533,24 +507,6 @@ fun SettingsScreen(nav: NavController) {
                     // edges spanned about 0.21 of the screen against the
                     // cruiser's own 0.36. An experiment does not belong on a
                     // cruiser's settings screen. The scan gate reads BOTH keys.
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("Automatic stem edges (experimental)",
-                                style = type.body, color = colors.textPrimary)
-                            Text(
-                                "NOT A MEASUREMENT YET. Finds the trunk in the camera image " +
-                                    "and places the bracket on its edges; take hold of the " +
-                                    "bracket and it stands aside. Falls back to the depth " +
-                                    "edge-finder whenever it has no answer. Readings taken " +
-                                    "this way are recorded as \"segmented\".",
-                                style = type.caption, color = colors.textSecondary,
-                            )
-                        }
-                        Switch(
-                            checked = settings.dbhAutoSegmentation,
-                            onCheckedChange = { env.settings.setDbhAutoSegmentation(it) },
-                        )
-                    }
                     // DBH algorithm — depth-method diameter fit. Moved in from
                     // its own former section; developer-only, since normal
                     // users get the single blessed path (iOS gates it the same).

@@ -629,6 +629,7 @@ internal suspend fun convertPlannedToActivePlot(
 /// centre", then returns to the map.
 @Composable
 fun CruiseOffsetHostScreen(nav: NavController, projectId: String, plannedPlotId: String) {
+    val back = com.hcjeong.forestix.ui.rememberSafeBack(nav)
     val env = LocalAppEnvironment.current
     val scope = rememberCoroutineScope()
     var project by remember { mutableStateOf<Project?>(null) }
@@ -672,7 +673,7 @@ fun CruiseOffsetHostScreen(nav: NavController, projectId: String, plannedPlotId:
             scope.launch {
                 try {
                     convertPlannedToActivePlot(env, loadedProject, loadedPlanned, result)
-                    nav.popBackStack()
+                    back()
                 } catch (e: Exception) {
                     error = "Storage error: ${e.message ?: e}. " +
                         "The centre was not saved — try again."

@@ -18,8 +18,29 @@ import com.hcjeong.forestix.data.AppSettings
 import com.hcjeong.forestix.ui.ForestixRoot
 import com.hcjeong.forestix.ui.theme.ForestixTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import androidx.lifecycle.lifecycleScope
+import android.content.ComponentCallbacks2
+import com.hcjeong.forestix.sensors.YoloBoundaryAligner
 
 class MainActivity : ComponentActivity() {
+    private fun trimInferenceCache(){lifecycleScope.launch(Dispatchers.Default){YoloBoundaryAligner.trimCached()}}
+    override fun onStop(){super.onStop();trimInferenceCache()}
+    override fun onLowMemory(){super.onLowMemory();trimInferenceCache()}
+    override fun onTrimMemory(level:Int){
+        super.onTrimMemory(level)
+        if(level>=ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW)trimInferenceCache()
+    }
+    private val fieldUIFlowOwner=java.util.UUID.randomUUID().toString()
+    override fun onResume(){
+        super.onResume()
+        com.hcjeong.forestix.data.fieldstudy.FieldUIFlowRegistry.shared.owner(fieldUIFlowOwner,true,android.os.SystemClock.elapsedRealtimeNanos()/1e9)
+    }
+    override fun onPause(){
+        com.hcjeong.forestix.data.fieldstudy.FieldUIFlowRegistry.shared.owner(fieldUIFlowOwner,false,android.os.SystemClock.elapsedRealtimeNanos()/1e9)
+        super.onPause()
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

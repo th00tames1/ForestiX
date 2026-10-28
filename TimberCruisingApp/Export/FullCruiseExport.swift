@@ -109,7 +109,7 @@ public enum FullCruiseExporter {
     ) throws -> ExportArtefact? {
         switch kind {
         case .csvTrees:
-            let csv = CSVExporter.treesCSV(trees: bundle.trees)
+            let csv = CSVExporter.treesCSV(trees: bundle.trees, species: bundle.species)
             return try writeData(Data(csv.utf8), name: "trees.csv",
                                  display: "Trees (CSV)", kind: kind,
                                  folder: folder)

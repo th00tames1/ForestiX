@@ -134,6 +134,7 @@ import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
+import com.hcjeong.forestix.data.fieldstudy.*
 import com.hcjeong.forestix.data.SettingsSnapshot
 import com.hcjeong.forestix.data.cruise.CrashRecoveryService
 import com.hcjeong.forestix.data.cruise.TreeLabel
@@ -196,6 +197,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -258,6 +260,18 @@ fun MapHomeScreen(nav: NavController) {
     // switching modes never snaps or re-zooms the map)
 
     val pins = remember(entries) { buildTreePins(entries) }
+    val fieldStudy by env.fieldStudy.state.collectAsStateWithLifecycle()
+    var fieldTargetDetail by remember{mutableStateOf<String?>(null)}
+    var fieldLaunchBusy by remember{mutableStateOf(false)}
+    var fieldLaunchError by remember{mutableStateOf<String?>(null)}
+    val fieldMarkers=remember(fieldStudy.targets,fieldStudy.configuration,fieldStudy.measurements,fieldStudy.selectedTargetId){
+        if(!fieldStudy.configuration.mapOverlayEnabled)emptyList()else fieldStudy.overlayTargets.mapNotNull{t->
+            val lat=t.latitude;val lon=t.longitude
+            if(lat==null||lon==null)null else MapMarker(CoordinateConversions.LatLon(lat,lon),t.label,
+                tint=if(t.id==fieldStudy.selectedTargetId)androidx.compose.ui.graphics.Color.Green else androidx.compose.ui.graphics.Color.Cyan,
+                id="study-${t.id}",shape=MapMarkerShape.DOT,selected=t.id==fieldStudy.selectedTargetId)
+        }
+    }
 
     // Last fix → else newest located reading → else the Peavy Hall fallback,
     // always at DefaultZoom (iOS startUp()).
@@ -474,7 +488,8 @@ fun MapHomeScreen(nav: NavController) {
     // System back: cruise mode is a MODE of the home, not a destination —
     // back first dismisses a raised peek (the mode-specific handlers below
     // compose later, so they win while enabled), then flips cruise back to
-    // measure; measure mode keeps the default behaviour.
+    // measure. Only an unhandled Back on the map starts the two-tap exit.
+    com.hcjeong.forestix.ui.MapBackExitHandler(nav)
     BackHandler(enabled = isCruise) { setMode("measure") }
     BackHandler(enabled = !isCruise && selectedPin != null) { selectedPinId = null }
     BackHandler(enabled = isCruise && cruise.selectedId != null) { cruise.selectedId = null }
@@ -514,25 +529,27 @@ fun MapHomeScreen(nav: NavController) {
             // The sampling plot itself — above the survey boundary and the
             // guide line, below the you-dot and the pins.
             plot = plotOverlay?.overlay,
-            markers = if (isCruise) {
+            markers = (if (isCruise) {
                 cruiseModeMarkers(cruise, settings, colors)
             } else {
                 pins.map { pin ->
                     MapMarker(
                         coordinate = pin.coordinate,
                         title = pin.title,
-                        tint = if (pin.warn) colors.confidenceWarn else colors.primary,
+                        tint = colors.primary,
                         id = pin.id,
                         shape = MapMarkerShape.PIN,
                         badges = pin.badges,
                         selected = pin.id == selectedPinId,
                     )
                 }
-            },
+            }) + fieldMarkers,
             // Tapping the selected pin again deselects it (iOS toggle).
             onMarkerTap = { id ->
                 developerUnlock.reset()
-                if (isCruise) {
+                if(id.startsWith("study-")){
+                    fieldTargetDetail=id.removePrefix("study-")
+                }else if (isCruise) {
                     cruise.selectedId = if (cruise.selectedId == id) null else id
                 } else {
                     selectedPinId = if (selectedPinId == id) null else id
@@ -833,6 +850,29 @@ fun MapHomeScreen(nav: NavController) {
 
     // MARK: - Sheets + photo detail
 
+    fieldTargetDetail?.let{id->FieldStudyTargetDetailSheet(id,onMeasure={kind->
+        if(!fieldLaunchBusy){
+            fieldLaunchBusy=true;fieldTargetDetail=null
+            scope.launch{
+                var staged:PendingTreeNumber.Lock?=null
+                val origin=nav.currentBackStackEntry
+                try{
+                    val payload=prepareFieldQuickTarget(env,id,null)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if(nav.currentBackStackEntry!=origin)return@launch
+                    env.fieldStudy.selectTarget(id)
+                    CruiseCapture.end(env)
+                    staged=PendingTreeNumber.stage(payload)
+                    nav.navigate(if(kind==FieldStudyKind.DBH)Routes.DBH else Routes.HEIGHT)
+                }catch(e:kotlinx.coroutines.CancellationException){throw e}
+                catch(e:Exception){staged?.let{PendingTreeNumber.clearStaged(it)};fieldLaunchError=e.message?:"Target measurement unavailable"}
+                finally{fieldLaunchBusy=false}
+            }
+        }
+    }){fieldTargetDetail=null}}
+    fieldLaunchError?.let{message->AlertDialog(onDismissRequest={fieldLaunchError=null},
+        title={Text("Target measurement unavailable")},text={Text(message)},
+        confirmButton={TextButton(onClick={fieldLaunchError=null}){Text("OK")}})}
     if (chooserOpen) {
         // The species already recorded against the tree the peek card scoped
         // to. Read once so the sheet and its provisional flag cannot disagree
@@ -853,21 +893,44 @@ fun MapHomeScreen(nav: NavController) {
                 chooserOpen = false
                 chooserTreeOverride = null
             },
-            onChoose = { route, lockTree, name, speciesCode ->
+            onChoose = choose@ { route, lockTree, name, speciesCode ->
+                if(fieldLaunchBusy)return@choose
                 chooserOpen = false
                 // Full / DBH / Height lock the reading to the tree number
                 // the sheet header promised (iOS chooserRow actions) — the
                 // peek card's override tree when set, else the next free —
                 // and to the name and species typed above them.
-                if (lockTree) {
-                    PendingTreeNumber.set(
-                        number = chooserTreeOverride ?: env.history.suggestedNextTreeNumber,
-                        name = name,
-                        speciesCode = speciesCode,
-                    )
-                }
+                val existingRequested=chooserTreeOverride!=null
+                val number=chooserTreeOverride?:env.history.suggestedNextTreeNumber
                 chooserTreeOverride = null
-                nav.navigate(route)
+                if(!lockTree){nav.navigate(route)}else{
+                    fieldLaunchBusy=true;val origin=nav.currentBackStackEntry
+                    scope.launch{
+                        var staged:PendingTreeNumber.Lock?=null
+                        try{
+                            var payload=PendingTreeNumber.Lock(number=number,name=name,speciesCode=speciesCode,
+                                plotID=env.history.activePlotID.value?:env.history.defaultPlotID())
+                            if(env.fieldStudy.state.value.configuration.enabled){
+                                env.fieldStudy.awaitPendingWrites();kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                val study=env.fieldStudy.state.value
+                                if(!study.loaded||study.error!=null)throw FieldStudyException("missing","Field-study archive unavailable")
+                                val fallback=env.history.defaultPlotID();val plot=payload.plotID
+                                    ?:throw FieldStudyException("missing","Measure log plot unavailable")
+                                val source=env.history.entries.value.filter{it.treeNumber==number&&(it.plotID?:fallback)==plot}
+                                payload=if(source.isNotEmpty()){
+                                    payload.copy(fieldTarget=FieldResultTargetBinding.resolve(source.map{it.id.toString()},"quick_history",
+                                        study.configuration.studyId,study.measurements,study.activeTargets))
+                                }else if(existingRequested){throw FieldStudyException("missing","Original Measure log tree unavailable")}
+                                else study.selectedTargetId?.let{prepareFieldQuickTarget(env,it,plot)}?:payload
+                            }
+                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                            if(nav.currentBackStackEntry!=origin)return@launch
+                            staged=PendingTreeNumber.stage(payload);nav.navigate(route)
+                        }catch(e:kotlinx.coroutines.CancellationException){throw e}
+                        catch(e:Exception){staged?.let{PendingTreeNumber.clearStaged(it)};fieldLaunchError=e.message?:"Target measurement unavailable"}
+                        finally{fieldLaunchBusy=false}
+                    }
+                }
             },
         )
     }
@@ -1608,7 +1671,6 @@ private fun MeasureRow(entry: QuickMeasureEntry, unitSystem: UnitSystem) {
                 color = colors.textPrimary,
             )
         }
-        TierChipSoft(entry.confidenceRaw, explains = tierExplainerKind(entry.kind))
     }
 }
 
@@ -1993,7 +2055,6 @@ private fun readingPhotoPage(
     photoPath: String,
     system: UnitSystem,
 ): PhotoPage {
-    val tier = confidenceDescriptor(entry.confidenceRaw)
     val tree = listOfNotNull(
         // The caption strip has room for the whole name, so it prints the
         // full title rather than the pin's shortened form.
@@ -2011,7 +2072,7 @@ private fun readingPhotoPage(
     return PhotoPage(
         photoPath = photoPath,
         headline = bigValueText(entry, system),
-        detail = listOfNotNull(sigmaText(entry, system), tier.label).joinToString(" · "),
+        detail = listOfNotNull(sigmaText(entry, system)).joinToString(" · "),
         meta = listOf("TREE" to tree, "METHOD" to methodLabel(entry.method), "GPS" to gps),
         caption = PhotoCaption.READING,
     )

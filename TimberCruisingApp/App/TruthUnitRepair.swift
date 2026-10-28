@@ -257,6 +257,9 @@ public enum TruthUnitRepair {
         var unitless: [GroupKey: [Double]] = [:]
         var stamped: [GroupKey: [Double]] = [:]
         for s in summaries {
+            guard s.manifest.measurementId == nil, s.manifest.captureEvidence == nil else {
+                if s.manifest.truth.value != nil { plan.kept.unverifiable += 1 }; continue
+            }
             guard let value = s.manifest.truth.value, value.isFinite, value > 0
             else { continue }
             guard let q = Quantity.ofRawKind(s.manifest.kind) else {
@@ -281,6 +284,7 @@ public enum TruthUnitRepair {
         }
 
         for e in entries {
+            guard e.allowsLegacyInference else { if e.truth != nil { plan.kept.unverifiable += 1 }; continue }
             guard let truth = e.truth, truth.isFinite, truth > 0 else { continue }
             guard let q = Quantity.of(e.kind) else {
                 plan.kept.otherQuantity += 1

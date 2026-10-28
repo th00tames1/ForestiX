@@ -61,10 +61,6 @@ data class RawCaptureStatus(val text: String, val saved: Boolean)
 object RawCaptureStrings {
     const val SAVED = "Raw capture saved"
 
-    /// Developer mode on, recorder off: the session is producing NO corpus.
-    const val OFF_NOTICE =
-        "Raw capture OFF — nothing is being recorded (Settings › Developer)"
-
     /// Settings ASK for recording but the recorder is not actually armed —
     /// nothing is being kept. Shown in the failure colour.
     const val NOT_ARMED = "NOT RECORDING — recorder not armed"
@@ -209,17 +205,6 @@ private fun OutcomePill(status: RawCaptureStatus) {
                 else colors.confidenceBad.copy(alpha = 0.95f),
             )
             .padding(horizontal = 8.dp, vertical = 4.dp),
-    )
-}
-
-/// Dev-block notice: developer mode is on but raw capture is off, so the
-/// field session is producing no corpus.
-@Composable
-fun RawCaptureOffNotice() {
-    Text(
-        RawCaptureStrings.OFF_NOTICE,
-        style = Forestix.type.caption,
-        color = Forestix.colors.confidenceWarn,
     )
 }
 

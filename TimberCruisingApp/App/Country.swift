@@ -26,6 +26,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
     case finland      = "fi"
     case germany      = "de"
     case southKorea   = "kr"
+    case international = "international"
 
     public var id: String { rawValue }
 
@@ -42,6 +43,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         case .finland:      return "Finland"
         case .germany:      return "Germany"
         case .southKorea:   return "South Korea"
+        case .international: return "International"
         }
     }
 
@@ -52,6 +54,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         case .finland:      return "🇫🇮"
         case .germany:      return "🇩🇪"
         case .southKorea:   return "🇰🇷"
+        case .international: return "🌐"
         }
     }
 
@@ -61,6 +64,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         case .finland:      return "Nordic · Laasasenaho stem volume (m³)"
         case .germany:      return "Central Europe · form-factor volume (m³)"
         case .southKorea:   return "NIFoS metric (m³) · coefficients pending"
+        case .international: return "All species · no default volume equation"
         }
     }
 
@@ -95,6 +99,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         case .finland:      return .laasasenaho1982
         case .germany:      return .germanFormFactor
         case .southKorea:   return .koreaNIFoSPending
+        case .international: return .unconfigured
         }
     }
 
@@ -119,6 +124,7 @@ public enum Country: String, CaseIterable, Identifiable, Sendable {
         case .finland:      return Country.finlandSpecies
         case .germany:      return Country.germanySpecies
         case .southKorea:   return Country.koreaSpecies
+        case .international: return [] // The shared catalogue supplies all species.
         }
     }
 
@@ -256,6 +262,7 @@ public enum VolumeStandard: String, Sendable {
     case laasasenaho1982    // Finland: Laasasenaho (1982) total stem volume
     case germanFormFactor   // Germany: V = g·h·f form-factor approximation
     case koreaNIFoSPending  // Korea: NIFoS table, coefficients pending
+    case unconfigured
 
     /// Read-only label shown in Settings → Country & region. Matches Android.
     public var displayName: String {
@@ -264,10 +271,11 @@ public enum VolumeStandard: String, Sendable {
         case .laasasenaho1982:   return "Laasasenaho (1982) · m³"
         case .germanFormFactor:  return "Form factor  V = g·h·f · m³ (approx.)"
         case .koreaNIFoSPending: return "NIFoS national table — coefficients pending"
+        case .unconfigured:     return "No default volume equation"
         }
     }
 
     /// TRUE while a country is selectable but cannot yet compute volume (Korea).
     /// Stand-level volume renders "—" rather than a fabricated number.
-    public var isPending: Bool { self == .koreaNIFoSPending || self == .usLogRule }
+    public var isPending: Bool { self == .koreaNIFoSPending || self == .usLogRule || self == .unconfigured }
 }

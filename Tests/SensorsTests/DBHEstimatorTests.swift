@@ -87,13 +87,13 @@ final class DBHEstimatorTests: XCTestCase {
         XCTAssertNotNil(result.rejectionReason)
     }
 
-    func testPipelineRedWhenTapDepthOutOfRange() {
-        // Camera 5 m from cylinder → tap depth > 3.0 m → reject.
+    func testPipelineRedWhenTapDepthOutOfRange() throws {
+        // Keep the synthetic surface beyond the current 5 m admission limit.
         let input = makeInput(
             rTrue: 0.30, arcDeg: 90,
             frames: 10, samplesPerFrame: 120,
             noise: 0.005, seed: 3,
-            cameraDistance: 5.0)
+            cameraDistance: 6.0)
         guard let result = DBHEstimator.estimate(input: input) else {
             return XCTFail("Expected red-tier result for out-of-range tap")
         }
@@ -106,9 +106,9 @@ final class DBHEstimatorTests: XCTestCase {
         // rewrote 89 such strings and left every threshold untouched. Pinning
         // the wording again would only re-break the next time it improves —
         // pinning the band keeps the message honest about the gate.
-        let reason = result.rejectionReason!
+        let reason = try XCTUnwrap(result.rejectionReason)
         XCTAssertTrue(
-            reason.contains("0.5") && reason.contains("3"),
+            reason.contains("0.5") && reason.contains("5"),
             "the distance rejection must quote its own usable band — got \(reason)")
     }
 
@@ -295,7 +295,8 @@ final class DBHEstimatorTests: XCTestCase {
                 width: width, height: height,
                 depth: depth, confidence: conf,
                 intrinsics: K, cameraPoseWorld: pose,
-                timestamp: TimeInterval(f) / 15))
+                timestamp: TimeInterval(f) / 15,
+                dbhDepthInputPolicy: DBHMeasurementDepth.sensorConfidence))
         }
 
         return DBHScanInput(

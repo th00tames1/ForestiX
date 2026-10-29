@@ -762,11 +762,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 liveStemMask = liveMaskPreview.update(null, now)
                 liveStemGuideExtent = liveMaskPreview.guideExtent
                 if(liveStemMask==null){liveMaskFrame=null;liveAIRecordSource=null;liveMaskInferenceId=null}
-                autoAlignmentMessage = outcome.exceptionOrNull()?.message ?: "AI unavailable. Use Adjust."
-                delay(750)
+                autoAlignmentMessage = AutoSafetyPolicy.LIVE_RETRY_MESSAGE
+                if (debugDiagnostics && now - lastDiagnostic >= 1.0) {
+                    lastDiagnostic = now
+                    android.util.Log.w("ForestiXAuto", "Live inference failed", outcome.exceptionOrNull())
+                }
             }
             val elapsed = SystemClock.elapsedRealtime() / 1000.0 - started
-            delay(LiveAutoCadence.delayMillis(elapsed,inferenceThermallyLimited))
+            delay(AutoSafetyPolicy.liveInferenceDelayMillis(
+                LiveAutoCadence.delayMillis(elapsed,inferenceThermallyLimited), outcome.isFailure))
         }
     }
     // Auto never falls back silently to a different depth-walk measurement.
@@ -1798,6 +1802,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         }
     }
 
+    fun clearAutoPreviewForRetry() {
+        liveMaskPreview.reset();liveMaskFrame=null;liveStemMask=null;liveStemGuideExtent=null
+        adjustPreview=null;adjustShown=null;adjustHeld=null;adjustHeldAt=0L
+    }
+
     fun captureFrozenAuto() {
         if(accepting||stage!=Stage.AIMING||!resumed)return
         val id=fieldCapture.tryBegin(rawCaptureArmed,true)?:return
@@ -1819,20 +1828,21 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
             var tracked:com.hcjeong.forestix.sensors.YoloTrackedCapture?=null
             var ai=FieldAIProvenance(enabled=true,reason="shutter_rgb_depth_v1")
             var handedToWorker=false
+            var displayFailureMessage:String?=null
             val referenceProgress=java.util.concurrent.atomic.AtomicReference<RawCameraJPEG?>(null)
             try {
-                val deadline=SystemClock.elapsedRealtime()+250
+                val deadline=SystemClock.elapsedRealtime()+AutoSafetyPolicy.PAIRED_INPUT_WAIT_MILLIS
                 do {
                     currentCoroutineContext().ensureActive()
                     pendingInput=controller.captureDBHSnapshot()
                     if(pendingInput!=null)break
-                    delay(16)
+                    delay(AutoSafetyPolicy.PAIRED_INPUT_POLL_MILLIS)
                 } while(SystemClock.elapsedRealtime()<deadline)
-                val input=pendingInput?:error("Waiting for a fresh camera and depth frame.")
+                val input=pendingInput?:error(AutoSafetyPolicy.CAPTURE_INPUT_MESSAGE)
                 // The worker owns the native Image until preparation really
                 // finishes, even if its UI deadline or lifecycle cancels us.
                 handedToWorker=true
-                tracked=com.hcjeong.forestix.sensors.DBHSnapshotIdentity.processingWorker.run(
+                tracked=try { com.hcjeong.forestix.sensors.DBHSnapshotIdentity.processingWorker.run(
                     AutoSafetyPolicy.CAPTURE_PROCESSING_MILLIS,onFinish={input.close()}) { work ->
                     val prepared=input.camera.use { camera ->
                         work.checkCancellation()
@@ -1848,16 +1858,22 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         else com.hcjeong.forestix.sensors.YoloTrackedCapture(model.track(prepared.first,prepared.second,input.depth,
                             input.viewWidth.toFloat(),input.viewHeight.toFloat(),input.camera.imageFromViewAffine))
                     } }
+                } } catch(error:Exception) {
+                    if(error !is kotlinx.coroutines.CancellationException &&
+                        error !is com.hcjeong.forestix.common.DeadlineWorkException) {
+                        displayFailureMessage=AutoSafetyPolicy.CAPTURE_INFERENCE_MESSAGE
+                    }
+                    throw error
                 }
                 reference=referenceProgress.get()
                 currentCoroutineContext().ensureActive()
                 if(!resumed||!fieldCapture.continueCapture()||controller.viewWidthPx!=input.viewWidth||controller.viewHeightPx!=input.viewHeight)
-                    error("Camera alignment or survey settings changed. Retry capture.")
+                    error(AutoSafetyPolicy.CAPTURE_CHANGED_MESSAGE)
                 val observation=tracked.observation
                 ai=FieldAIProvenance(enabled=true,inferenceRan=true,maskDetected=observation?.mask!=null,inferenceId=inferenceId,reason="shutter_rgb_depth_v1")
                 if(rawCaptureArmed&&reference==null)error("Capture RGB could not be preserved. Retry capture.")
                 val guide=LiveStemMaskPreview.validGuide(observation?.guideExtent)
-                if(observation?.mask==null||guide==null)error("No stem at the crosshair. Aim at the trunk or use Adjust.")
+                if(observation?.mask==null||guide==null)error(AutoSafetyPolicy.CAPTURE_NO_STEM_MESSAGE)
                 val vw=input.viewWidth.toFloat();val cy=input.viewHeight/2f
                 val geometry=DBHEstimator.bracketDepthGeometry(input.depth,(guide.leftFraction*vw).toFloat(),
                     (guide.rightFraction*vw).toFloat(),cy)?:error("Camera alignment is unavailable. Retry capture.")
@@ -1881,8 +1897,13 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     heldPhoto=reference?.let { MeasurePhotoStore.saveSnapshot(context,it,observation.mask,guide,input.viewWidth,input.viewHeight) }
                 } else discardHeldPhoto()
                 result=measured
-                failure=if(measured==null)"Couldn't read depth in the captured trunk. Retry capture."else null
-                stage=if(measured==null)Stage.AIMING else Stage.RESULT
+                failure=null
+                val valid=measured!=null&&measured.confidence!=ConfidenceTier.RED
+                if(!valid){
+                    clearAutoPreviewForRetry()
+                    captureRefusal=measured?.rejectionReason?:AutoSafetyPolicy.CAPTURE_INVALID_DEPTH_MESSAGE
+                }
+                stage=if(valid)Stage.RESULT else Stage.AIMING
             } catch(cancelled:kotlinx.coroutines.CancellationException){
                 throw cancelled
             } catch(error:Exception){
@@ -1895,10 +1916,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     RawCaptureStore.BracketSpec((guide.leftFraction*w).toFloat(),(guide.rightFraction*w).toFloat(),capturedInput.viewHeight/2f)
                 }else null
                 recordRefusedAI(id,reason,ai,tracked?.source,recordAI,readinessSnapshot?:pendingInput?.depth,referenceProgress.get()?:reference,capturedContext,bracket)
-                liveMaskPreview.reset();liveMaskFrame=null;liveStemMask=null;liveStemGuideExtent=null
-                adjustPreview=null;adjustShown=null;adjustHeld=null;adjustHeldAt=0L
+                clearAutoPreviewForRetry()
                 if(error is com.hcjeong.forestix.common.DeadlineWorkException){segmentationOn=false;adjustMode=true}
-                captureRefusal=reason;stage=Stage.AIMING
+                captureRefusal=displayFailureMessage?:reason;stage=Stage.AIMING
             } finally {if(!handedToWorker)pendingInput?.close();sampleProgress=0}
         }
     }

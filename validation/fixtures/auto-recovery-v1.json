@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "description": "Synthetic application recovery contract; no camera, field or benchmark data.",
+  "live_error_retry_seconds": 0.75,
+  "paired_input_wait_seconds": 0.25,
+  "paired_input_poll_seconds": 0.016,
+  "capture_processing_seconds": 5,
+  "auto_maximum_seconds": 60,
+  "messages": {
+    "live_retry": "Auto temporarily unavailable. Retrying…",
+    "input": "Waiting for a fresh camera and depth frame.",
+    "changed": "Camera alignment or survey settings changed. Retry capture.",
+    "no_stem": "No stem at the crosshair. Aim at the trunk or use Adjust.",
+    "invalid_depth": "Couldn't read depth in the captured trunk. Retry capture.",
+    "inference": "Auto capture failed. Retry or use Adjust.",
+    "timeout": "AI processing timed out. Use Adjust or retry Auto.",
+    "busy": "AI is still finishing. Use Adjust and retry Auto shortly."
+  },
+  "delays": [
+    {"name": "healthy_fast", "cadence_seconds": 0.002, "failed": false, "expected_seconds": 0.002},
+    {"name": "healthy_thermal", "cadence_seconds": 0.020, "failed": false, "expected_seconds": 0.020},
+    {"name": "healthy_idle", "cadence_seconds": 0.062, "failed": false, "expected_seconds": 0.062},
+    {"name": "healthy_slow", "cadence_seconds": 0.125, "failed": false, "expected_seconds": 0.125},
+    {"name": "target_not_found_is_not_an_error", "cadence_seconds": 0.002, "failed": false, "expected_seconds": 0.002},
+    {"name": "native_failure", "cadence_seconds": 0.002, "failed": true, "expected_seconds": 0.750},
+    {"name": "busy_failure", "cadence_seconds": 0.020, "failed": true, "expected_seconds": 0.750},
+    {"name": "already_slow_failure", "cadence_seconds": 1.000, "failed": true, "expected_seconds": 1.000},
+    {"name": "invalid_cadence", "cadence_seconds": -1.000, "failed": false, "expected_seconds": 0.750}
+  ]
+}

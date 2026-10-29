@@ -65,7 +65,9 @@ final class DBHSnapshotCaptureTests: XCTestCase {
         vm.viewSize = CGSize(width: 120,height: 90);vm.requestAutoAlignment()
         vm.tap(at: SIMD2(60,45));await waitForCapture(vm)
         XCTAssertEqual(vm.state,.aligning);XCTAssertNil(vm.result);XCTAssertNil(vm.snapshotGuide)
-        XCTAssertNotNil(vm.captureRefusalReason);XCTAssertEqual(vm.resultGeneration,0)
+        XCTAssertEqual(vm.captureRefusalReason,AutoSafetyPolicy.captureNoStemMessage)
+        XCTAssertFalse(vm.edgeAdjustActive);XCTAssertTrue(vm.segmentationEnabled)
+        XCTAssertEqual(vm.resultGeneration,0)
     }
     @MainActor func testTimedOutInferenceRecoversToAdjustAndNeverPublishesLateResult() async throws {
         let frozen = try input(), observation = observation(), finish = DispatchSemaphore(value: 0)
@@ -117,7 +119,9 @@ final class DBHSnapshotCaptureTests: XCTestCase {
         vm.viewSize = CGSize(width: 120,height: 90);vm.requestAutoAlignment()
         vm.tap(at: SIMD2(60,45));await waitForCapture(vm)
         XCTAssertEqual(vm.state,.aligning);XCTAssertNil(vm.result)
-        XCTAssertNotNil(vm.captureRefusalReason);XCTAssertEqual(vm.resultGeneration,0)
+        XCTAssertEqual(vm.captureRefusalReason,AutoSafetyPolicy.captureInputMessage)
+        XCTAssertFalse(vm.edgeAdjustActive);XCTAssertTrue(vm.segmentationEnabled)
+        XCTAssertEqual(vm.resultGeneration,0)
     }
     @MainActor func testLeavingDuringInferenceCannotPublishLaterResult() async throws {
         let frozen = try input(),observation = observation()
@@ -136,8 +140,51 @@ final class DBHSnapshotCaptureTests: XCTestCase {
         let vm = DBHScanViewModel(calibration: .identity,snapshotCaptureService: service)
         vm.viewSize = CGSize(width: 120,height: 90);vm.requestAutoAlignment()
         vm.tap(at: SIMD2(60,45));await waitForCapture(vm)
-        XCTAssertEqual(vm.state,.rejected);XCTAssertNil(vm.result)
+        XCTAssertEqual(vm.state,.aligning);XCTAssertNil(vm.result)
+        XCTAssertEqual(vm.captureRefusalReason,AutoSafetyPolicy.captureInvalidDepthMessage)
+        XCTAssertFalse(vm.edgeAdjustActive);XCTAssertTrue(vm.segmentationEnabled)
         XCTAssertEqual(vm.resultGeneration,1)
+    }
+    @MainActor func testInvalidAutoDepthCanRetryDirectlyWithoutRetakeOrUsingOldInput() async throws {
+        var current = try input(0)
+        let observation = observation()
+        let service = DBHSnapshotCaptureService(acquire: {current},infer: {_,_,_,_,_ in .init(observation: observation)})
+        let vm = DBHScanViewModel(calibration: .identity,snapshotCaptureService: service)
+        vm.viewSize = CGSize(width:120,height:90);vm.requestAutoAlignment()
+        vm.tap(at:SIMD2(60,45));await waitForCapture(vm)
+        let failedID = vm.measurementId
+        XCTAssertEqual(vm.state,.aligning);XCTAssertNil(vm.result)
+        current = try input(1.25)
+        vm.tap(at:SIMD2(60,45));await waitForCapture(vm)
+        XCTAssertEqual(vm.state,.fitted);XCTAssertNotEqual(vm.measurementId,failedID)
+        XCTAssertEqual(vm.resultGeneration,2);XCTAssertNil(vm.captureRefusalReason)
+        let expected = try XCTUnwrap(DBHEstimator.bracketChordEstimate(frames:[current.frame],guideAxis:.row(y:45),
+            leftFraction:guide.leftFraction,rightFraction:guide.rightFraction,calibration:.identity))
+        XCTAssertEqual(vm.result?.diameterCm,expected.diameterCm)
+    }
+    @MainActor func testInferenceFailureUsesCommonGuidanceButPreservesOriginalReasonAndInput() async throws {
+        let frozen = try input()
+        let nativeReason = "Synthetic inference failure"
+        let service = DBHSnapshotCaptureService(acquire:{frozen},infer:{_,_,_,_,_ in
+            throw NSError(domain:"Synthetic.Auto",code:1,userInfo:[NSLocalizedDescriptionKey:nativeReason])
+        })
+        let vm = DBHScanViewModel(calibration:.identity,snapshotCaptureService:service)
+        vm.rawCaptureEnabled = true;vm.rawCapturePreserveAIInputs = false
+        vm.viewSize = CGSize(width:120,height:90);vm.requestAutoAlignment()
+        vm.tap(at:SIMD2(60,45))
+        let id = try XCTUnwrap(vm.measurementId)
+        defer { try? FileManager.default.removeItem(at:RawCaptureStore.bundleDirectory(id:id)) }
+        await waitForCapture(vm);await PendingWorkRegistry.rawCapture.waitUntilIdle()
+        XCTAssertEqual(vm.state,.aligning);XCTAssertNil(vm.result)
+        XCTAssertFalse(vm.edgeAdjustActive);XCTAssertTrue(vm.segmentationEnabled)
+        XCTAssertEqual(vm.captureRefusalReason,AutoSafetyPolicy.captureInferenceMessage)
+        let manifest = try XCTUnwrap(RawCaptureStore.loadManifest(id:id))
+        let evidence = try XCTUnwrap(manifest.captureEvidence)
+        XCTAssertFalse(evidence.displayedResult.valid)
+        XCTAssertEqual(evidence.attemptFailureReason,nativeReason)
+        XCTAssertEqual(evidence.frames.first?.sourceFrameId,frozen.image.sourceFrameId)
+        XCTAssertEqual(evidence.images?.first?.sourceFrameId,frozen.image.sourceFrameId)
+        XCTAssertEqual(vm.resultGeneration,0)
     }
     @MainActor func testPortraitColumnCaptureRemainsHorizontalInView() async throws {
         let frozen = try input(rotated: true),observation = observation()

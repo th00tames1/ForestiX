@@ -3,6 +3,7 @@ package com.hcjeong.forestix.fieldstudy
 import android.os.SystemClock
 import com.hcjeong.forestix.common.DeadlineWorkExecutor
 import com.hcjeong.forestix.common.DeadlineWorkException
+import com.hcjeong.forestix.common.AutoSafetyPolicy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
@@ -11,6 +12,14 @@ import kotlinx.coroutines.*
  * preferences, starts AR/GPS, captures an image or accepts a measurement. */
 internal object ConnectedCaptureDeadlineChecks {
     fun run()=runBlocking {
+        for(cadence in listOf(2L,20L,62L,125L)) {
+            check(AutoSafetyPolicy.liveInferenceDelayMillis(cadence,false)==cadence)
+            check(AutoSafetyPolicy.liveInferenceDelayMillis(cadence,true)==750L)
+        }
+        check(AutoSafetyPolicy.PAIRED_INPUT_WAIT_MILLIS==250L)
+        check(AutoSafetyPolicy.PAIRED_INPUT_POLL_MILLIS==16L)
+        check(DeadlineWorkException.Busy().message==AutoSafetyPolicy.CAPTURE_BUSY_MESSAGE)
+        check(DeadlineWorkException.TimedOut().message==AutoSafetyPolicy.CAPTURE_TIMEOUT_MESSAGE)
         val worker=DeadlineWorkExecutor();val finish=CountDownLatch(1);val closed=AtomicInteger()
         try {
             val began=SystemClock.elapsedRealtime()

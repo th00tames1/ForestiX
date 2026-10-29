@@ -408,8 +408,11 @@ public final class DBHScanViewModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self?.applyLiveAuto(outcome, tick: tick)
                 let elapsed = ProcessInfo.processInfo.systemUptime - tick.started
-                let delay = LiveAutoCadence.delaySeconds(elapsed: elapsed,
+                let cadenceDelay = LiveAutoCadence.delaySeconds(elapsed: elapsed,
                     thermallyLimited: ProcessInfo.processInfo.thermalState != .nominal)
+                let failed: Bool
+                switch outcome { case .success: failed = false; case .failure: failed = true }
+                let delay = AutoSafetyPolicy.liveInferenceDelaySeconds(cadenceDelay: cadenceDelay, failed: failed)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -494,7 +497,10 @@ public final class DBHScanViewModel: ObservableObject {
             // bracket. Neither clock is refreshed by this miss.
             liveMaskPreview.update(nil, at: now)
             expireLiveMask(at: now)
-            autoAlignmentMessage = error.localizedDescription
+            autoAlignmentMessage = AutoSafetyPolicy.liveRetryMessage
+            #if DEBUG
+            print("ForestiX Auto inference error: \(error.localizedDescription)")
+            #endif
         }
     }
     #else
@@ -1650,12 +1656,12 @@ public final class DBHScanViewModel: ObservableObject {
                 guard self?.captureGeneration == generation, self?.state == .capturing else { return }
                 pending = service.acquire()
                 if pending != nil { break }
-                try? await Task.sleep(for: .milliseconds(16))
-            } while ProcessInfo.processInfo.systemUptime - started < 0.25
+                try? await Task.sleep(for: .seconds(AutoSafetyPolicy.pairedInputPollSeconds))
+            } while ProcessInfo.processInfo.systemUptime - started < AutoSafetyPolicy.pairedInputWaitSeconds
             guard let self,self.captureGeneration == generation,self.state == .capturing else { return }
             guard let input = pending else {
                 self.snapshotInferencePending = false; self.captureSampleIndex = 0; self.state = .aligning
-                self.captureRefusalReason = "Waiting for a fresh camera and depth frame."
+                self.captureRefusalReason = AutoSafetyPolicy.captureInputMessage
                 var ai = FieldAIProvenance(); ai.enabled = true; ai.reason = "snapshot_input_unavailable"
                 self.onFieldCaptureEvent?(.refused(id: id,reason: "snapshot_input_unavailable",ai: ai))
                 if self.segmentationEnabled { self.startSegmentationFeed() }
@@ -1689,7 +1695,7 @@ public final class DBHScanViewModel: ObservableObject {
             // Device motion after capture is irrelevant. A viewport/session
             // change is not: it cancels instead of mixing coordinate spaces.
             guard self.viewSize == viewport, self.orientationRefusal(for: input.frame) == nil else {
-                self.refuseFrozenAuto(id: id, reason: "Camera alignment changed. Retry capture.",
+                self.refuseFrozenAuto(id: id, reason: AutoSafetyPolicy.captureChangedMessage,
                     input: input, reference: output.0, tracked: try? output.1.get(), inferenceID: inferenceID)
                 return
             }
@@ -1709,10 +1715,16 @@ public final class DBHScanViewModel: ObservableObject {
                   let geometry = DBHEstimator.bracketDepthGeometry(frame: input.frame,
                     leftFraction: guide.leftFraction, rightFraction: guide.rightFraction, viewSize: viewport) else {
                 let reason: String
-                if case .failure(let error) = output.1 { reason = error.localizedDescription }
-                else { reason = "No stem at the crosshair. Aim at the trunk or use Adjust." }
+                let displayReason: String
+                if case .failure(let error) = output.1 {
+                    reason = error.localizedDescription
+                    displayReason = AutoSafetyPolicy.captureInferenceMessage
+                } else {
+                    reason = AutoSafetyPolicy.captureNoStemMessage
+                    displayReason = reason
+                }
                 self.refuseFrozenAuto(id: id, reason: reason, input: input, reference: output.0,
-                    tracked: tracked, inferenceID: inferenceID)
+                    tracked: tracked, inferenceID: inferenceID, displayReason: displayReason)
                 return
             }
             self.burstFieldAI.boundaryApplied = true
@@ -1745,22 +1757,29 @@ public final class DBHScanViewModel: ObservableObject {
 
     #if canImport(CoreImage) && canImport(CoreVideo)
     private func refuseFrozenAuto(id: String, reason: String, input: DBHCameraSnapshot,
-                                  reference: RawCameraJPEG?, tracked: YoloTrackedCapture?, inferenceID: String) {
+                                  reference: RawCameraJPEG?, tracked: YoloTrackedCapture?, inferenceID: String,
+                                  displayReason: String? = nil) {
         var ai = FieldAIProvenance(); ai.enabled = true; ai.inferenceRan = tracked != nil
         ai.reason = "shutter_rgb_depth_v1"
         ai.maskDetected = tracked?.observation?.mask != nil; ai.inferenceId = ai.inferenceRan ? inferenceID : nil
         burstFieldAI = ai; burstAIRecordSource = tracked?.source
         onFieldCaptureEvent?(.refused(id: id, reason: reason, ai: ai))
         recordRefusedAIIfNeeded(id: id, reason: reason, ai: ai, snapshot: input.frame, reference: reference)
+        snapshotInferencePending = false; captureGeneration &+= 1
+        burstBuffer.removeAll(keepingCapacity: true); captureSampleIndex = 0
+        resumeAutoAimingAfterFailure(displayReason ?? reason)
+    }
+    #endif
+
+    /// Failed Auto captures stay retryable, without accepting a value or changing
+    /// the user's mode. Raw evidence receives the original failure beforehand.
+    private func resumeAutoAimingAfterFailure(_ message: String) {
         clearLiveAutoLock()
         previewFit = nil; previewDbhCm = nil; previewTier = nil; distanceToStemCenterM = nil
         resetBracketSettling()
-        snapshotInferencePending = false; captureGeneration &+= 1
-        burstBuffer.removeAll(keepingCapacity: true); captureSampleIndex = 0
-        captureRefusalReason = reason; state = .aligning
+        captureRefusalReason = message; state = .aligning
         if segmentationEnabled { startSegmentationFeed() }
     }
-    #endif
 
     /// Why the Auto crosshair is not armed, in terms the cruiser can walk on.
     ///
@@ -2002,6 +2021,9 @@ public final class DBHScanViewModel: ObservableObject {
                 reason: result?.rejectionReason ?? (result == nil ? "no_valid_depth_result" : nil),ai: burstFieldAI))
         }
         recordRawBurstIfNeeded()
+        if burstUsedSegmentation, state != .fitted {
+            resumeAutoAimingAfterFailure(result?.rejectionReason ?? AutoSafetyPolicy.captureInvalidDepthMessage)
+        }
     }
 
     /// Serialize the raw-capture bundle for the just-finished depth burst

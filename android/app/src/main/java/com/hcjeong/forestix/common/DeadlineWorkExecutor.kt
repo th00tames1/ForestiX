@@ -9,8 +9,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resumeWithException
 
 sealed class DeadlineWorkException(message:String):IllegalStateException(message) {
-    class Busy:DeadlineWorkException("AI is still finishing. Use Adjust and retry Auto shortly.")
-    class TimedOut:DeadlineWorkException("AI processing timed out. Use Adjust or retry Auto.")
+    class Busy:DeadlineWorkException(AutoSafetyPolicy.CAPTURE_BUSY_MESSAGE)
+    class TimedOut:DeadlineWorkException(AutoSafetyPolicy.CAPTURE_TIMEOUT_MESSAGE)
 }
 
 class SingleFlightGate {

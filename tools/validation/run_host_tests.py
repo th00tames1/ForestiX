@@ -61,6 +61,8 @@ def host_targets(package):
         fields = [f'name: {json.dumps(target["name"])}',
                   f'dependencies: {json.dumps(deps)}',
                   f'path: {json.dumps(target["path"])}']
+        if target.get('exclude'):
+            fields.append('exclude: ' + json.dumps(target['exclude']))
         resources = []
         for resource in target.get('resources', []):
             rule = next(iter(resource['rule']))

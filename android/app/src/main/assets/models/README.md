@@ -1,17 +1,14 @@
-# On-device segmentation weights
+# Android Auto alignment model
 
-`tree_seg_640.onnx` is **not in git** and this directory ships empty. The app
-builds and runs without it; the Auto diameter path simply falls back to the
-depth walk and says so (see `TreeSegmenter.availability`).
+The current Auto DBH path uses `yolo26_alignment.onnx` through
+`YoloBoundaryAligner`. A local copy belongs in this directory; model binaries
+remain excluded from Git. A build without that model keeps the existing
+unavailable/fallback behavior.
 
-The file is a YOLO11n-seg export, 640x640, batch 1, classes `{0: soot, 1: tree}`
-— the BSI bark-scorch study's trained weights. That manuscript is unpublished
-and this repository is public, so the weights are carried in the working tree
-and in the app bundle but never committed.
+`tree_seg_640.onnx` is a retired private BSI research model. It is not used by
+the current Auto path and must not be distributed with ForestiX. The Android
+build excludes that filename from every variant even if a local research copy
+is present. The exclusion does not delete the local file.
 
-To rebuild with segmentation:
-
-    cp <BSI>/Resources/models/yolo11n-seg_640_b16.onnx \
-       TimberCruisingApp/Sensors/Models/tree_seg_640.onnx
-
-Android takes the same file at `android/app/src/main/assets/models/tree_seg_640.onnx`.
+Before publishing an APK, check that `assets/models/tree_seg_640.onnx` is absent
+and that the intended `assets/models/yolo26_alignment.onnx` is present.

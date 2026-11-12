@@ -104,13 +104,13 @@ let package = Package(
                          condition: .when(platforms: [.iOS]))
             ],
             path: "TimberCruisingApp/Sensors",
+            exclude: ["Models/tree_seg_640.onnx"],
             resources: [
-                // The segmentation weights, when a build has them. `.copy` of
-                // the DIRECTORY rather than the file: it is gitignored (see
-                // Models/README.md), so naming the file would make a fresh
-                // clone fail to resolve rather than simply build without the
-                // feature.
-                .copy("Models")
+                // Process individual files so the private legacy model stays
+                // excluded even when a local research copy exists. ONNX bytes
+                // are copied unchanged; the Auto loader already supports the
+                // bundle root. README keeps model-free clones buildable.
+                .process("Models")
             ]
         ),
 

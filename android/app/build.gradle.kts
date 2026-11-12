@@ -39,6 +39,18 @@ android {
 
     buildFeatures { compose = true }
 
+    // Public application bundles must never carry the retired private BSI model.
+    // Retain AGP 8.7's standard ignore list when adding our model exclusion.
+    androidResources {
+        if (ignoreAssetsPatterns.isEmpty()) {
+            ignoreAssetsPatterns += listOf(
+                "!.svn", "!.git", "!.ds_store", "!*.scc", ".*", "<dir>_*",
+                "!CVS", "!thumbs.db", "!picasa.ini", "!*~"
+            )
+        }
+        ignoreAssetsPatterns += "!tree_seg_640.onnx"
+    }
+
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
         // 16 KB page-size devices (Android 15+): native libs must ship

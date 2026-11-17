@@ -460,6 +460,8 @@ object RawCaptureStore {
         baseAim: HeightAim? = null,
         topAim: HeightAim? = null,
         captureEvidence: RawCaptureEvidence? = null,
+        anchorAim: HeightAim? = null,
+        inertialRecording: RawInertialRecording? = null,
     ): RecordOutcome = withContext(Dispatchers.IO) {
         val free = freeSpaceBytes(context)
         if (free < MIN_FREE_BYTES) {
@@ -512,6 +514,14 @@ object RawCaptureStore {
             anchorJson.put("hit_type", anchorHitType)
             anchorJson.put("distance_m", anchorDistanceM.toDouble())
             anchorJson.put("camera_pose", floatArr(anchorPose))
+            inertialRecording?.let { heightBlock.put("imu",JSONObject(it.write(id,dir).toString())) }
+            val anchorEvidenceFrame=anchorAim?.frame?.let { RawCaptureEvidenceIO.writeFrame(it,"anchor",dir) }
+            val anchorEvidenceImage=RawCaptureEvidenceIO.attachImage(anchorAim?.imageMetadata,anchorAim?.rgb,null,"anchor",dir)
+            anchorEvidenceFrame?.let { anchorJson.put("frame",JSONObject(RawCaptureEvidence.frameJson(it).toString())) }
+            anchorEvidenceImage?.let { anchorJson.put("image",JSONObject(RawCaptureEvidence.imageJson(it).toString())) }
+            if(anchorAim!=null||inertialRecording!=null)anchorJson.put("capture_status",JSONObject()
+                .put("depth",if(anchorAim?.frame==null)"unavailable" else "captured")
+                .put("rgb",if(anchorAim?.imageMetadata==null||anchorAim.rgb==null)"unavailable" else "captured"))
             heightBlock.put("anchor", anchorJson)
             val baseJson = JSONObject()
             baseJson.put("pitch_deg", basePitchDeg.toDouble())
@@ -548,10 +558,11 @@ object RawCaptureStore {
             if(evidence!=null){
                 require(evidence.measurementId==id){"Capture evidence identity"}
                 evidence=evidence.copy(frames=listOf("base" to baseAim?.frame,"top" to topAim?.frame).mapNotNull{(role,f)->
-                    f?.let{RawCaptureEvidenceIO.writeFrame(it,role,dir)}})
+                    f?.let{RawCaptureEvidenceIO.writeFrame(it,role,dir)}}+listOfNotNull(anchorEvidenceFrame))
                 evidence=evidence.copy(images=listOfNotNull(
                     RawCaptureEvidenceIO.attachImage(baseAim?.imageMetadata,baseAim?.rgb,baseJson.optString("rgb_file").takeIf{it.isNotEmpty()&&it!="null"},"base",dir),
-                    RawCaptureEvidenceIO.attachImage(topAim?.imageMetadata,topAim?.rgb,topJson.optString("rgb_file").takeIf{it.isNotEmpty()&&it!="null"},"top",dir)))
+                    RawCaptureEvidenceIO.attachImage(topAim?.imageMetadata,topAim?.rgb,topJson.optString("rgb_file").takeIf{it.isNotEmpty()&&it!="null"},"top",dir),
+                    anchorEvidenceImage))
                 evidence=RawCaptureEvidence.parse(evidence.json().toString())
                 manifest.put("capture_evidence",JSONObject(evidence.json().toString()))
                 evidence=evidence.noteReplay(RawCaptureReplay.rerunCapturedHeight(manifest))

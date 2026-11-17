@@ -219,25 +219,12 @@ private const val ANCHOR_LOST =
 /// What Android IS exposed to is the other half: a relocalization re-fits the
 /// world frame, and `standingAtAnchor` is a raw Vec3 in the frame as it stood
 /// at anchoring, so the displacement across the re-fit is not a walk. A
-/// cruiser on foot cannot exceed MAX_CAMERA_SPEED_MPS, so anything that does
+/// cruiser on foot cannot exceed CameraPoseSpeedGuard's limit, so anything that does
 /// is the world moving under the measurement, not the cruiser — and a distance
 /// the app cannot stand behind freezes and says so rather than counting on.
 private const val POSE_JUMPED =
     "The camera's position jumped — the distance is frozen, not restarted, and can't be trusted from here. Tap Retake and anchor the trunk again."
 
-/// Ceiling on how fast the camera may move and still be a person on foot.
-/// 4.0 m/s is 14.4 km/h — about four times a cruiser's backwards walking pace,
-/// well clear of raising the phone overhead (~1.7 m/s) or a quick pivot
-/// (~1.5 m/s), and far below a world-frame re-fit, which lands metres inside
-/// one poll. iOS holds the identical value in
-/// `HeightScanViewModel.maxCameraSpeedMPS`.
-private const val MAX_CAMERA_SPEED_MPS = 4.0f
-
-/// Longest gap between two camera samples that may still be differenced into a
-/// speed. Beyond it the pair straddles a pose outage — ARCore hands back null
-/// through the whole of PAUSED — and the quotient describes nothing. That case
-/// belongs to TRACKING_DROPPED_DURING_WALK, not to this gate.
-private const val MAX_POSE_SAMPLE_GAP_MS = 500L
 /// ANDROID-ONLY, deliberately — the three constants above are byte-identical
 /// to their iOS siblings and this one has none, which is worth saying out loud
 /// rather than leaving to be discovered as drift. ARCore's
@@ -387,9 +374,7 @@ fun HeightScanScreen(
     /// Latched, and as fatal as `anchorLost`: d_h is frozen at a distance that
     /// belongs to a world frame nothing is standing behind any more.
     var poseJumped by remember { mutableStateOf(false) }
-    /// Previous camera sample for the speed test — position + the elapsed
-    /// clock it was read at.
-    var lastPoseSample by remember { mutableStateOf<Pair<Vec3, Long>?>(null) }
+    val poseSpeedGuard = remember { com.hcjeong.forestix.common.CameraPoseSpeedGuard() }
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
 
@@ -435,6 +420,27 @@ fun HeightScanScreen(
     // base / top, the anchor hit type, and the 5 Hz pose-sample trail from
     // anchoring to compute. Populated only while armed; zero cost otherwise.
     val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    val rawIMU = remember(rawCaptureArmed) { if (rawCaptureArmed) com.hcjeong.forestix.sensors.RawIMUCapture(context) else null }
+    val rawLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    var rawResumed by remember(rawLifecycleOwner) {
+        mutableStateOf(rawLifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(rawLifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, _ ->
+            rawResumed = rawLifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+        }
+        rawLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { rawLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val rawRecordingAllowed = rawCaptureArmed && rawResumed && !manualOpen &&
+        stage in listOf(Stage.ANCHOR,Stage.WALKING,Stage.AIM_BASE,Stage.AIM_TOP)
+    DisposableEffect(rawIMU,rawRecordingAllowed) {
+        val token = if (rawRecordingAllowed) { rawIMU?.resume(); ArSessionHub.armRawHeightEvidence() } else null
+        onDispose { rawIMU?.pause(); token?.let { ArSessionHub.releaseRawHeightEvidence(it) } }
+    }
+    DisposableEffect(rawIMU) { onDispose { rawIMU?.close() } }
+    var anchorAimFrame by remember { mutableStateOf<ArDepthFrame?>(null) }
+    var anchorAimRgb by remember { mutableStateOf<RawCameraJPEG?>(null) }
     var anchorPose by remember { mutableStateOf<FloatArray?>(null) }
     var anchorHitType by remember { mutableStateOf("unknown") }
     var basePose by remember { mutableStateOf<FloatArray?>(null) }
@@ -673,27 +679,11 @@ fun HeightScanScreen(
             // differencing across an outage divides a world-frame re-fit by
             // however long the cruiser stood in the dark and calls the result
             // a walking pace.
-            val camNow = controller.currentCameraPosition()
-            if (camNow == null) {
-                lastPoseSample = null
-            } else {
-                val tNow = SystemClock.elapsedRealtime()
-                if (!poseJumped) {
-                    lastPoseSample?.let { (prev, tPrev) ->
-                        val dt = tNow - tPrev
-                        // A gap is not a speed, and two samples in the same
-                        // millisecond divide jitter by ~0 and read as a jump.
-                        if (dt in 10..MAX_POSE_SAMPLE_GAP_MS) {
-                            val dx = camNow.x - prev.x
-                            val dy = camNow.y - prev.y
-                            val dz = camNow.z - prev.z
-                            val speed =
-                                kotlin.math.sqrt(dx * dx + dy * dy + dz * dz) / (dt / 1000f)
-                            if (speed.isFinite() && speed > MAX_CAMERA_SPEED_MPS) poseJumped = true
-                        }
-                    }
-                }
-                lastPoseSample = camNow to tNow
+            val poseSample = controller.heightCameraSnapshot()
+            if (poseSample == null) poseSpeedGuard.reset()
+            else if (!poseJumped) {
+                val p = poseSample.position
+                if (poseSpeedGuard.observe(p.x, p.y, p.z, poseSample.timestampNanos / 1e9)) poseJumped = true
             }
             // `poseJumped` freezes the readouts for the rest of the
             // measurement, exactly as a null pose freezes them for as long as
@@ -716,6 +706,7 @@ fun HeightScanScreen(
     LaunchedEffect(stage, rawCaptureArmed) {
         if (!rawCaptureArmed) return@LaunchedEffect
         while (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP) {
+            if (rawResumed) rawIMU?.observe(ArSessionHub.pollRawHeightObservation())
             controller.currentCameraPose()?.let {
                 // Cap the trail like iOS (~600 samples = 2 min at 5 Hz):
                 // unbounded, a session left standing on the aim stage grew
@@ -903,6 +894,8 @@ fun HeightScanScreen(
         // now and hand them off; recordHeight copies them into the bundle.
         val baseAim = RawCaptureStore.HeightAim(baseAimFrame, baseAimRgb?.data,baseAimRgb?.metadata)
         val topAim = RawCaptureStore.HeightAim(topAimFrame, topAimRgb?.data,topAimRgb?.metadata)
+        val anchorAim = RawCaptureStore.HeightAim(anchorAimFrame,anchorAimRgb?.data,anchorAimRgb?.metadata)
+        val inertial = rawIMU?.finish()
         // Anchor, computed result and bundle keep the same attempt ID.
         lastRawCaptureId = id
         // Aim depth frames are the schema-2 payload; when the recorder was
@@ -934,6 +927,8 @@ fun HeightScanScreen(
                 baseAim = baseAim,
                 topAim = topAim,
                 captureEvidence = evidence,
+                anchorAim = anchorAim,
+                inertialRecording = inertial,
             )
             fieldCapture.raw(id, if (outcome.saved) FieldRawStatus.SAVED else FieldRawStatus.FAILED,
                 if (outcome.saved && aimsMissing) "missing_aim_depth_frames" else
@@ -1057,7 +1052,7 @@ fun HeightScanScreen(
                 // tree's runaway says nothing about this one, and the previous
                 // sample is in a world frame this walk does not share.
                 poseJumped = false
-                lastPoseSample = null
+                poseSpeedGuard.reset()
                 standingAtAnchor = standing
                 anchorInitialDistM = d0
                 dhLive = d0
@@ -1069,11 +1064,15 @@ fun HeightScanScreen(
                     anchorHitType = controller.lastCenterHitInfo?.substringBefore(' ') ?: "unknown"
                     poseSamples.clear()
                     anchorTimeMs = System.currentTimeMillis()
+                    val nativeAnchor = controller.heightCameraSnapshot()
+                    rawIMU?.begin(id,nativeAnchor?.timestampNanos,nativeAnchor?.poseMatrix)
+                    val (fr,rgb) = captureAim()
+                    anchorAimFrame = fr; anchorAimRgb = rgb
                 }
                 stage = Stage.WALKING
             }
-            Stage.WALKING -> { stage = Stage.AIM_BASE }
-            Stage.AIM_BASE -> {
+            // The first tap after walking captures the base, not a Continue step.
+            Stage.WALKING, Stage.AIM_BASE -> {
                 val id = fieldCapture.currentId ?: return
                 val sighting = controller.heightCameraSnapshot()
                 val a = sighting?.elevationRad
@@ -1105,6 +1104,7 @@ fun HeightScanScreen(
                 standingOffset = Vec3(s.x - anchor.x, s.y - anchor.y, s.z - anchor.z)
                 if (rawCaptureArmed) {
                     basePose = sighting.poseMatrix
+                    rawIMU?.mark("base",sighting.timestampNanos,basePose)
                     val (fr, rgb) = captureAim()
                     baseAimFrame = fr; baseAimRgb = rgb
                 }
@@ -1163,6 +1163,7 @@ fun HeightScanScreen(
                 val topPosNow = sighting.position
                 if (rawCaptureArmed) {
                     topPose = sighting.poseMatrix
+                    rawIMU?.mark("top",sighting.timestampNanos,topPose)
                     val (fr, rgb) = captureAim()
                     topAimFrame = fr; topAimRgb = rgb
                 }
@@ -1234,6 +1235,7 @@ fun HeightScanScreen(
 
     fun resetCrown() { crownStep = CrownStep.NONE; cL = null; cR = null; cT = null; cB = null; crownW = null; crownH = null }
     fun resetAll() {
+        rawIMU?.finish()
         if (accepting) return
         fieldCapture.currentId?.let { fieldCapture.abandon(it, "retake") }
         // The held frame captions the measurement being thrown away — keeping
@@ -1248,7 +1250,7 @@ fun HeightScanScreen(
         // new measurement must pin its own trunk, never inherit the last one.
         ArSessionHub.clearHeightAnchor()
         trackingLive = true; trackingDropped = false; anchorLost = false
-        poseJumped = false; lastPoseSample = null
+        poseJumped = false; poseSpeedGuard.reset()
         result = null; failure = null; resetCrown()
         // Drop the raw-capture geometry so a fresh measurement starts clean.
         // Releasing the bundle id too: a discarded compute must not collect
@@ -1258,6 +1260,8 @@ fun HeightScanScreen(
         anchorPose = null; basePose = null; topPose = null
         anchorHitType = "unknown"; poseSamples.clear()
         baseAimFrame = null; topAimFrame = null; baseAimRgb = null; topAimRgb = null
+        anchorAimFrame = null; anchorAimRgb = null
+        if (rawRecordingAllowed) rawIMU?.resume()
     }
 
     // Accept the result: record the entry (photo + GPS + metadata), fold in
@@ -1655,11 +1659,21 @@ fun HeightScanScreen(
         // within seconds). Telling the cruiser to keep the aim on the tree
         // was stricter than the code and made them walk backwards for
         // nothing. Byte-identical to iOS.
-        stage == Stage.WALKING -> "Walk back — keep the phone up and the lens clear"
+        stage == Stage.WALKING -> "Aim at base when ready"
         stage == Stage.AIM_TOP -> "Aim at treetop"
         stage == Stage.AIM_BASE -> "Aim at trunk + ground"
         else -> null
     }
+
+    val scanHintKey = when {
+        manualOpen -> null
+        stage == Stage.ANCHOR && anchorAimOk -> "height.anchor"
+        stage == Stage.WALKING -> "height.walk"
+        stage == Stage.AIM_BASE -> "height.base"
+        stage == Stage.AIM_TOP -> "height.top"
+        else -> null
+    }
+    val showScanHint = com.hcjeong.forestix.ui.screens.rememberScanHintVisible(scanHintKey)
 
     Box(Modifier.fillMaxSize()) {
         ArCameraView(
@@ -1910,12 +1924,13 @@ fun HeightScanScreen(
                         MeasurementFormatter.guidanceDistance(
                             ANCHOR_MAX_M.toDouble(), settings.unitSystem) +
                         " of the trunk, then tap +."
+                scanHintKey != null && !showScanHint -> null
                 stage == Stage.ANCHOR -> "Aim at the trunk at eye level, then tap +."
-                stage == Stage.WALKING -> "Walk back, then tap + to continue."
+                stage == Stage.WALKING -> "Walk away, then turn back to aim at the base and tap +."
                 stage == Stage.AIM_BASE -> "Aim at where the trunk meets the ground, then tap +."
                 stage == Stage.AIM_TOP -> "Aim at the treetop, then tap +."
                 stage == Stage.REJECTED -> result?.rejectionReason ?: "Rejected."
-                else -> "Height computed."
+                else -> null
             },
             failure = failure,
             onDismissFailure = { failure = null },

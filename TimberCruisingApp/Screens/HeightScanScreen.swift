@@ -28,6 +28,7 @@ import simd
 public struct HeightScanScreen: View {
 
     @StateObject private var viewModel: HeightScanViewModel
+    @State private var scanHints = ScanHintPresentation()
     @StateObject private var fieldCapture = FieldCaptureCoordinator()
     @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
     @Environment(\.fieldStudyStore) private var fieldStudyStore
@@ -479,6 +480,13 @@ public struct HeightScanScreen: View {
         // closer" range-gate message as the cruiser approaches the trunk.
         // The tap itself re-raycasts, so the gate enforced by the view
         // model always uses a fresh hit — this sampler only drives chrome.
+        .task(id: scanHintKey) {
+            let key = scanHintKey
+            guard scanHints.begin(key) else { return }
+            do { try await Task.sleep(for: .seconds(ScanHintPresentation.durationSeconds)) }
+            catch { return }
+            scanHints.dismiss(key)
+        }
         .task(id: anchorAiming) {
             guard anchorAiming else {
                 anchorAimDistanceM = nil
@@ -793,7 +801,7 @@ public struct HeightScanScreen: View {
         // metres out within seconds). Telling the cruiser to keep the aim
         // on the tree was stricter than the code and made them walk
         // backwards for nothing.
-        case .walking:          return "Walk back — keep the phone up and the lens clear"
+        case .walking:          return "Aim at base when ready"
         case .aimTopArmed:      return "Aim at treetop"
         case .aimBaseArmed:     return "Aim at trunk + ground"
         case .aimTopCaptured,
@@ -1023,7 +1031,17 @@ public struct HeightScanScreen: View {
             }
     }
 
-    private var statusText: String {
+    private var scanHintKey: String? {
+        switch viewModel.state {
+        case .idle, .anchorSet: return anchorWithinGate ? "height.anchor" : nil
+        case .walking: return "height.walk"
+        case .aimBaseArmed: return "height.base"
+        case .aimTopArmed: return "height.top"
+        default: return nil
+        }
+    }
+
+    private var statusText: String? {
         // Walk-off integrity beats stage guidance: "walk back" is useless
         // advice while the camera has no idea where it is, and the trunk
         // anchor being gone ends the measurement outright. Same precedence
@@ -1043,6 +1061,7 @@ public struct HeightScanScreen: View {
             if !viewModel.trackingLive { return HeightScanViewModel.trackingLostNow }
         default: break
         }
+        if let key = scanHintKey, !scanHints.isVisible(key) { return nil }
         switch viewModel.state {
         case .idle, .anchorSet:
             return anchorWithinGate
@@ -1056,12 +1075,11 @@ public struct HeightScanScreen: View {
                         m: Double(HeightScanViewModel.anchorMaxRangeM),
                         in: settings.unitSystem)
                     + " of the trunk, then tap +."
-        case .walking:            return "Walk back, then tap + to continue."
+        case .walking:            return "Walk away, then turn back to aim at the base and tap +."
         case .aimTopArmed:        return "Aim at the treetop, then tap +."
-        case .aimTopCaptured:     return "Top captured."
+        case .aimTopCaptured:     return nil
         case .aimBaseArmed:       return "Aim at where the trunk meets the ground, then tap +."
-        case .computed:           return "Height computed."
-        case .accepted:           return "Saved."
+        case .computed, .accepted: return nil
         case .rejected:           return viewModel.result?.rejectionReason
                                        ?? "Rejected."
         // The banner names the SAME unit the field below it is placeheld with
@@ -1514,7 +1532,7 @@ public struct HeightScanScreen: View {
         }
         switch viewModel.state {
         case .idle, .anchorSet:              anchorTap()
-        case .walking:                       viewModel.continueToAimTop()
+        case .walking:                       aimBaseTap()
         case .aimTopArmed, .aimTopCaptured:  aimTopTap()
         case .aimBaseArmed:                  aimBaseTap()
         default:                             break

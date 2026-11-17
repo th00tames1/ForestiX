@@ -41,6 +41,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.hcjeong.forestix.common.ScanHintPresentation
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,6 +76,22 @@ import com.hcjeong.forestix.ui.clickableNoRipple
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixProminentButton
 import com.hcjeong.forestix.ui.theme.ForestixWhiteButton
+
+/** Once per screen visit/mode, without a polling timer or saved preference. */
+@Composable
+fun rememberScanHintVisible(key: String?): Boolean {
+    val hints = remember { ScanHintPresentation() }
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(key) {
+        visible = hints.begin(key)
+        if (visible) {
+            delay(ScanHintPresentation.DURATION_MS)
+            hints.dismiss(key)
+            visible = false
+        }
+    }
+    return visible && hints.isVisible(key)
+}
 
 // MARK: - Top-strip geometry (shared by every AR screen)
 

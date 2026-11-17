@@ -248,6 +248,45 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// same mistake the estimator's old `.limited` latch made).
     @Published public private(set) var currentCameraWorldPosition: SIMD3<Float>?
     @Published public private(set) var cameraPositionTimestamp: TimeInterval?
+    private var rawHeightClients: Set<UUID> = []
+    private var rawFrameInterval: Double?
+    private var rawDeliveryHost: Double?
+    public func setRawHeightEvidence(client: UUID, enabled: Bool) {
+        if enabled { rawHeightClients.insert(client) } else { rawHeightClients.remove(client) }
+        if rawHeightClients.isEmpty { rawFrameInterval = nil; rawDeliveryHost = nil }
+    }
+    /// A single ARFrame owns both transforms. Delivery telemetry is separately
+    /// timestamped because currentFrame may advance ahead of the UI publisher.
+    public func rawHeightObservation(anchorID: UUID?) -> RawHeightObservation? {
+        guard !rawHeightClients.isEmpty else { return nil }
+        guard hasLiveFrame, let frame = session.currentFrame else {
+            return .init(arTimestamp: nil,observedHostTimestamp: ProcessInfo.processInfo.systemUptime.description,
+                cameraPose: nil,anchorPose: nil,trackingState: "frame_unavailable",trackingReason: nil,thermalState: "unknown",
+                deliveredArTimestamp: cameraPositionTimestamp?.description,deliveryHostTimestamp: rawDeliveryHost?.description,
+                nativeFrameIntervalSeconds: nil,anchorTrackingState: "unavailable")
+        }
+        let state: String, reason: String?
+        switch frame.camera.trackingState {
+        case .normal: state = "normal"; reason = nil
+        case .notAvailable: state = "not_available"; reason = nil
+        case .limited(let r): state = "limited"; reason = String(describing: r)
+        }
+        let thermal = ProcessInfo.processInfo.thermalState
+        let names: [ProcessInfo.ThermalState: String] = [.nominal:"nominal",.fair:"fair",.serious:"serious",.critical:"critical"]
+        func flat(_ matrix: simd_float4x4) -> [Double]? {
+            let values = RawCaptureMatrix.flat(matrix); return values.allSatisfy(\.isFinite) ? values : nil
+        }
+        let anchor = frame.anchors.first(where: { $0.identifier == anchorID })
+        let now = ProcessInfo.processInfo.systemUptime
+        let fresh = (0...0.5).contains(now - frame.timestamp)
+        return .init(arTimestamp: frame.timestamp.description,
+            observedHostTimestamp: now.description,
+            cameraPose: fresh ? flat(frame.camera.transform) : nil,
+            anchorPose: fresh ? anchor.flatMap { flat($0.transform) } : nil,
+            trackingState: fresh ? state : "frame_delivery_stale",trackingReason: reason,thermalState: names[thermal] ?? "unknown",
+            deliveredArTimestamp: cameraPositionTimestamp?.description,deliveryHostTimestamp: rawDeliveryHost?.description,
+            nativeFrameIntervalSeconds: rawFrameInterval,anchorTrackingState: anchor == nil ? "missing" : "present_in_frame")
+    }
 
     /// ARKit is `.limited(.relocalizing)` — it is RE-FITTING the world frame
     /// onto a scene it has recognised again, so world coordinates move
@@ -844,6 +883,10 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             self.trackingStatus = status
             if self.isRelocalizing != relocalizing { self.isRelocalizing = relocalizing }
             self.currentCameraWorldPosition = status == .notAvailable ? nil : camPos
+            if !self.rawHeightClients.isEmpty {
+                self.rawFrameInterval = self.cameraPositionTimestamp.flatMap { cameraTimestamp > $0 ? cameraTimestamp - $0 : nil }
+                self.rawDeliveryHost = ProcessInfo.processInfo.systemUptime
+            }
             self.cameraPositionTimestamp = cameraTimestamp
             if let converted,
                converted.viewportRevision == self.currentViewportRevision {
@@ -1038,6 +1081,8 @@ public final class ARKitSessionManager: ObservableObject {
     @Published public private(set) var isRelocalizing = false
 
     public static var supportsLiDAR: Bool { false }
+    public func setRawHeightEvidence(client: UUID, enabled: Bool) {}
+    public func rawHeightObservation(anchorID: UUID?) -> RawHeightObservation? { nil }
 
     public var onSessionPaused: (() -> Void)?
 

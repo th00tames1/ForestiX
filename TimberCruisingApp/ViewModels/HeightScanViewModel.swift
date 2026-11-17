@@ -170,16 +170,8 @@ public final class HeightScanViewModel: ObservableObject {
     /// IMU-only runaway passes several m/s within its first second, and a
     /// relocalization re-fit lands metres inside one frame interval, i.e.
     /// tens of m/s. Same value on Android.
-    public static let maxCameraSpeedMPS: Float = 4.0
-
-    /// Longest gap between two camera samples that may still be differenced
-    /// into a speed. Beyond it the samples straddle a pose outage and the
-    /// quotient means nothing — that case is `trackingDroppedDuringWalk`'s,
-    /// not this gate's.
-    private static let maxPoseSampleGapSeconds: TimeInterval = 0.5
-
-    /// Previous camera sample, for the speed test above.
-    private var lastPoseSpeedSample: (position: SIMD3<Float>, time: TimeInterval)?
+    public static let maxCameraSpeedMPS = CameraPoseSpeedGuard.maximumSpeedMetersPerSecond
+    private var poseSpeedGuard = CameraPoseSpeedGuard()
 
     /// Walk-off integrity copy. Byte identical to the Android
     /// HeightScanScreen.kt constants of the same names.
@@ -373,7 +365,35 @@ public final class HeightScanViewModel: ObservableObject {
     /// When true (screen sets it from `developerMode && rawCaptureEnabled`),
     /// every height `compute()` — accepted or not — serializes a raw-capture
     /// bundle (anchor + base/top poses + angles + d_h + 5 Hz pose track).
-    public var rawCaptureEnabled: Bool = false
+    public var rawCaptureEnabled: Bool = false {
+        didSet { if oldValue != rawCaptureEnabled { updateInertialRecording() } }
+    }
+    private var rawScreenActive = false
+    private var rawIMU: RawIMUCapture?
+    private var rawObservationTask: Task<Void, Never>?
+    private var recordAnchorFrame: ARDepthFrame?
+    private var recordAnchorJPEG: Data?
+    private var recordAnchorImageMetadata: RawCapturedImage?
+    private func updateInertialRecording() {
+        rawObservationTask?.cancel(); rawObservationTask = nil
+        let allowed = rawCaptureEnabled && rawScreenActive && result == nil && state != .manualEntry
+        session.setRawHeightEvidence(client: arClientID,enabled: allowed)
+        guard allowed else {
+            rawIMU?.pause()
+            if !rawCaptureEnabled { rawIMU = nil }
+            return
+        }
+        if rawIMU == nil { rawIMU = RawIMUCapture() }
+        rawIMU?.resume()
+        rawObservationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                if let self, let observation = self.session.rawHeightObservation(anchorID: self.trunkAnchorID) {
+                    self.rawIMU?.observe(observation)
+                }
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { break }
+            }
+        }
+    }
     public var rawCaptureContext: RawCaptureContext = .quick
     public var rawCaptureGPS: RawCaptureGPS?
     /// Minted synchronously when the compute finishes, BEFORE the detached
@@ -427,6 +447,8 @@ public final class HeightScanViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     public func onAppear() {
+        rawScreenActive = true
+        updateInertialRecording()
         if state == .idle { /* waiting for anchor tap */ }
         // Height keeps the depth stream (the walking readout reads the
         // depth-frame camera pose) + mesh raycasts; no VIO feature
@@ -436,6 +458,8 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     public func onDisappear() {
+        rawScreenActive = false
+        updateInertialRecording()
         session.detach(client: arClientID)
         depthCancellable?.cancel()
         depthCancellable = nil
@@ -448,6 +472,9 @@ public final class HeightScanViewModel: ObservableObject {
     /// round is fixing: the sphere gone and the measurement quietly untethered.
     /// The anchor lives in the app-shared session, so it survives that pause.
     public func releaseTrunkAnchor() {
+        rawObservationTask?.cancel(); rawObservationTask = nil
+        rawIMU?.pause(); rawIMU = nil
+        session.setRawHeightEvidence(client: arClientID,enabled: false)
         if let id = trunkAnchorID { session.removeWorldAnchor(id: id) }
         trunkAnchorID = nil
     }
@@ -460,7 +487,7 @@ public final class HeightScanViewModel: ObservableObject {
                 // Integrity FIRST: it publishes `trackingLive` for this frame,
                 // and both the pose trail and the walk readout below gate on
                 // it. Called the other way round the gate was a frame stale.
-                self.observeWalkIntegrity()
+                self.observeWalkIntegrity(frame: frame)
                 self.collectPoseSampleIfNeeded(frame)
                 self.samplePoseElevation(frame)
                 guard self.state == .walking else { return }
@@ -519,7 +546,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// (`trackingLive`, for the "hold still" status line) and for the whole
     /// measurement (`trackingDroppedDuringWalk`, which the result panel
     /// repeats at the moment the cruiser decides whether to keep the number).
-    private func observeWalkIntegrity() {
+    private func observeWalkIntegrity(frame: ARDepthFrame) {
         // EVERY STATE THAT STILL DRAWS A MARKER, not just the aiming ones.
         //
         // `.computed` and `.rejected` were missing and `.aimTopCaptured` is a
@@ -639,37 +666,25 @@ public final class HeightScanViewModel: ObservableObject {
             && !session.isRelocalizing
         if trackingLive != live { trackingLive = live }
         if !live, !trackingDroppedDuringWalk { trackingDroppedDuringWalk = true }
-        observePoseSpeed()
+        observePoseSpeed(frame: frame)
     }
 
     /// The physical plausibility half of walk-off integrity — see `poseJumped`
     /// for why a tracking latch alone cannot catch this.
     ///
-    /// Reads `currentCameraWorldPosition` DIRECTLY rather than through
-    /// `currentCameraTranslation()`, and that is the point: the accessor
-    /// refuses while relocalizing, which is precisely the frame pair the
-    /// re-fit jump falls between. The session publishes this one through every
-    /// `.limited` reason and stops only at `.notAvailable`, so the two failures
-    /// this gate exists for are both inside the sample stream.
-    private func observePoseSpeed() {
+    /// Keep each position paired with its own sensor-frame timestamp. Main
+    /// actor delivery can bunch up after a UI stall; processing-time deltas
+    /// incorrectly turned an ordinary walk into a permanent pose-jump refusal.
+    private func observePoseSpeed(frame: ARDepthFrame) {
         guard !poseJumped else { return }
-        guard let position = session.currentCameraWorldPosition else {
-            // No pose to sample. Drop the previous one too — differencing
-            // across the outage would divide a re-fit by however long the
-            // cruiser stood in the dark and call it a walking pace.
-            lastPoseSpeedSample = nil
+        guard session.trackingStatus != .notAvailable else {
+            poseSpeedGuard.reset()
             return
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        defer { lastPoseSpeedSample = (position, now) }
-        guard let previous = lastPoseSpeedSample else { return }
-        let dt = now - previous.time
-        // A gap is not a speed, and two samples inside one frame interval
-        // divide a few millimetres of jitter by ~0 and read as a jump.
-        guard dt >= 0.01, dt <= Self.maxPoseSampleGapSeconds else { return }
-        let speed = simd_distance(previous.position, position) / Float(dt)
-        guard speed.isFinite, speed > Self.maxCameraSpeedMPS else { return }
-        poseJumped = true
+        let t = frame.cameraPoseWorld.columns.3
+        if poseSpeedGuard.observe(position: SIMD3<Float>(t.x, t.y, t.z), timestamp: frame.timestamp) {
+            poseJumped = true
+        }
     }
 
     /// Accumulate 5 Hz camera poses from anchor to compute (developer mode
@@ -808,7 +823,7 @@ public final class HeightScanViewModel: ObservableObject {
         trackingDroppedDuringWalk = false
         anchorLost = false
         poseJumped = false
-        lastPoseSpeedSample = nil
+        poseSpeedGuard.reset()
         anchorPoseStaleSince = nil
         // Freeze the walk-panel reference values: "Initial dist" is the
         // camera→anchor horizontal distance at this instant, and the
@@ -826,6 +841,13 @@ public final class HeightScanViewModel: ObservableObject {
         recordTopFrame = nil; recordTopJPEG = nil; recordTopImageMetadata = nil
         recordAnchorPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
         recordAnchorTime = session.latestDepthFrame?.timestamp ?? 0
+        if rawCaptureEnabled {
+            rawIMU?.begin(id: measurementId!,arTimestamp: session.latestDepthFrame?.timestamp,
+                          cameraPose: session.latestDepthFrame.map { RawCaptureMatrix.flat($0.cameraPoseWorld) })
+            recordAnchorFrame = session.latestDepthFrame
+            let image = session.currentCameraImageJPEGSnapshot()
+            recordAnchorJPEG = image?.data; recordAnchorImageMetadata = image?.metadata
+        }
         state = .anchorSet
         state = .walking
         // Seed the throttled walk panel AND the point it flushes from, so a
@@ -879,18 +901,22 @@ public final class HeightScanViewModel: ObservableObject {
                             standingPointWorld: SIMD3<Float>,
                             aimedAtWorld: SIMD3<Float>? = nil) {
         guard mayContinueFieldCapture() else { return }
-        guard state == .aimBaseArmed, anchorPointWorld != nil else { return }
+        guard state == .walking || state == .aimBaseArmed, anchorPointWorld != nil else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
             return
         }
         alphaBaseRad = Float(median)
+        // The first tap after walking is the BASE sighting itself. No
+        // intermediate Continue tap and no automatic capture while moving.
+        updateLiveHint(standingPointWorld: standingPointWorld)
         alphaBaseSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         standingOffsetFromAnchor = anchorPointWorld.map { standingPointWorld - $0 }
         baseAimedOffset = anchorPointWorld.map { a in
             (aimedAtWorld ?? a) - a
         }
         recordBasePose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        rawIMU?.mark("base",arTimestamp: tapTime,cameraPose: RawCaptureMatrix.flat(recordBasePose))
         retainBaseAimFrame()
         state = .aimTopArmed
         rebuildSceneMarkers()
@@ -914,6 +940,7 @@ public final class HeightScanViewModel: ObservableObject {
             (aimedAtWorld ?? a) - a
         }
         recordTopPose = session.latestDepthFrame?.cameraPoseWorld ?? matrix_identity_float4x4
+        rawIMU?.mark("top",arTimestamp: tapTime,cameraPose: RawCaptureMatrix.flat(recordTopPose))
         retainTopAimFrame()
         compute()
         rebuildSceneMarkers()
@@ -1092,7 +1119,7 @@ public final class HeightScanViewModel: ObservableObject {
     public func captureBaseNow(screenCenterHit: SIMD3<Float>? = nil) {
         guard mayContinueFieldCapture() else { return }
         defer {
-            if state == .aimBaseArmed, let measurementId {
+            if state == .walking || state == .aimBaseArmed, let measurementId {
                 onFieldCaptureEvent?(.stageRefused(id: measurementId,stage: "base",reason: anchorFailureReason ?? "base_sighting_unavailable"))
             }
         }
@@ -1149,6 +1176,8 @@ public final class HeightScanViewModel: ObservableObject {
     }
 
     public func retake() {
+        rawIMU?.pause(); rawIMU = nil
+        recordAnchorFrame = nil; recordAnchorJPEG = nil; recordAnchorImageMetadata = nil
         if let measurementId { onFieldCaptureEvent?(.abandoned(id: measurementId,reason: "retake")) }
         measurementId = nil
         anchorPointWorld = nil
@@ -1160,7 +1189,7 @@ public final class HeightScanViewModel: ObservableObject {
         trackingDroppedDuringWalk = false
         anchorLost = false
         poseJumped = false
-        lastPoseSpeedSample = nil
+        poseSpeedGuard.reset()
         anchorPoseStaleSince = nil
         alphaTopRad = nil
         alphaBaseRad = nil
@@ -1186,6 +1215,7 @@ public final class HeightScanViewModel: ObservableObject {
         // typed after a retake must not land on the abandoned measurement.
         lastRecordedBundleID = nil
         state = .idle
+        updateInertialRecording()
         rebuildSceneMarkers()
     }
 
@@ -1233,6 +1263,7 @@ public final class HeightScanViewModel: ObservableObject {
 
     public func enterManualEntry() {
         state = .manualEntry
+        updateInertialRecording()
     }
 
     /// The unit system the cruiser is working in, kept in sync by the screen.
@@ -1355,6 +1386,12 @@ public final class HeightScanViewModel: ObservableObject {
         let topFrame = recordTopFrame
         let topJPEG = recordTopJPEG
         let baseImageMetadata = recordBaseImageMetadata; let topImageMetadata = recordTopImageMetadata
+        let inertial = rawIMU?.finish()
+        rawIMU = nil
+        let anchorFrame = recordAnchorFrame, anchorJPEG = recordAnchorJPEG
+        let anchorImageMetadata = recordAnchorImageMetadata
+        rawObservationTask?.cancel(); rawObservationTask = nil
+        session.setRawHeightEvidence(client: arClientID,enabled: false)
         guard let id = measurementId else { lastCaptureOutcome = .failed(reason: "measurement identity unavailable"); return }
         lastRecordedBundleID = id
         lastCaptureOutcome = nil
@@ -1382,7 +1419,8 @@ public final class HeightScanViewModel: ObservableObject {
                 calibration: cal, context: ctx, gps: gps,
                 baseFrame: baseFrame, baseJPEG: baseJPEG,
                 topFrame: topFrame, topJPEG: topJPEG,baseImageMetadata: baseImageMetadata,
-                topImageMetadata: topImageMetadata,captureEvidence: captured)
+                topImageMetadata: topImageMetadata,captureEvidence: captured,
+                inertial: inertial,anchorFrame: anchorFrame,anchorJPEG: anchorJPEG,anchorImageMetadata: anchorImageMetadata)
             let proof = RawCaptureStore.loadManifest(id: id)?.captureEvidence
             await publish(outcome,proof?.replayValue,proof?.replayStatus)
         }

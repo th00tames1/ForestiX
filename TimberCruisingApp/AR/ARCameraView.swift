@@ -23,6 +23,7 @@
 // and by HeightScanScreen to mark the anchor / top / base world points.
 
 import SwiftUI
+import Common
 
 // MARK: - Public marker surface (cross-platform)
 
@@ -504,12 +505,22 @@ public struct ARCameraView: UIViewRepresentable {
             blue:  CGFloat(marker.colorRGBA.z),
             alpha: CGFloat(marker.colorRGBA.w))
 
-        // Opaque markers (alpha ≥ 1) get SimpleMaterial so they pick up
-        // environment lighting and look like actual 3D balls. Translucent
-        // markers (the DBH trunk cylinder at 0.45 alpha) need blending
-        // that SimpleMaterial doesn't do — fall back to UnlitMaterial,
-        // which renders the alpha correctly at the cost of flat shading.
         let isOpaque = marker.colorRGBA.w >= 0.999
+        let isSphere: Bool
+        if case .sphere = marker.shape { isSphere = true } else { isSphere = false }
+        let emission = MarkerVisibility.minimumEmission(isSphere: isSphere, alpha: marker.colorRGBA.w)
+        if emission > 0 {
+            // Lit shading still gives the sphere depth. An emissive fill
+            // keeps its lower hemisphere coloured when sighting a treetop.
+            var material = PhysicallyBasedMaterial()
+            material.baseColor = .init(tint: uiColor)
+            material.roughness = .init(floatLiteral: 0.75)
+            material.metallic = .init(floatLiteral: 0)
+            material.emissiveColor = .init(color: uiColor)
+            material.emissiveIntensity = emission
+            return ModelEntity(mesh: mesh, materials: [material])
+        }
+        // Other geometry and translucent markers keep their existing material.
         let materials: [any RealityKit.Material] = isOpaque
             ? [SimpleMaterial(color: uiColor,
                               roughness: 0.5,

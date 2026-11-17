@@ -396,6 +396,7 @@ public struct RawCaptureManifest: Codable, Sendable {
     // MARK: Height sub-bundle
 
     public struct HeightBundle: Codable, Sendable {
+        public var imu: RawInertialAttachment?
         public var anchor: Anchor
         public var base: Aim
         public var top: Aim
@@ -410,7 +411,7 @@ public struct RawCaptureManifest: Codable, Sendable {
         /// block), and the same fact the research CSV column carries.
         public var trackingDropped: Bool?
         enum CodingKeys: String, CodingKey {
-            case anchor, base, top
+            case anchor, base, top, imu
             case dHM = "d_h_m"
             case poseSamples = "pose_samples"
             case trackingDropped = "tracking_dropped"
@@ -423,12 +424,16 @@ public struct RawCaptureManifest: Codable, Sendable {
         }
 
         public struct Anchor: Codable, Sendable {
+            public var frame: RawCapturedFrame?
+            public var image: RawCapturedImage?
+            public var captureStatus: [String: String]?
             public var world: [Double]      // [x, y, z]
             public var hitType: String
             public var distanceM: Double
             public var cameraPose: [Double] // 16
             enum CodingKeys: String, CodingKey {
-                case world
+                case world, frame, image
+                case captureStatus = "capture_status"
                 case hitType = "hit_type"
                 case distanceM = "distance_m"
                 case cameraPose = "camera_pose"

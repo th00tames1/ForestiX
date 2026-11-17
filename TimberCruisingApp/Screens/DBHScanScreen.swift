@@ -29,6 +29,7 @@ public struct DBHScanScreen: View {
     }
 
     @StateObject private var viewModel: DBHScanViewModel
+    @State private var scanHints = ScanHintPresentation()
     @StateObject private var fieldCapture = FieldCaptureCoordinator()
     @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
     @Environment(\.fieldStudyStore) private var fieldStudyStore
@@ -790,6 +791,13 @@ public struct DBHScanScreen: View {
         // dependency, and it is the same rule Android runs (see
         // ActiveSamplingPlot.refreshTrackedCentre). It also replaces the old
         // anchor-liveness poll: one gate, not two.
+        .task(id: scanHintKey) {
+            let key = scanHintKey
+            guard scanHints.begin(key) else { return }
+            do { try await Task.sleep(for: .seconds(ScanHintPresentation.durationSeconds)) }
+            catch { return }
+            scanHints.dismiss(key)
+        }
         .task(id: activePlot.plot?.anchorID) {
             guard activePlot.plot != nil else { return }
             while !Task.isCancelled {
@@ -2209,10 +2217,18 @@ public struct DBHScanScreen: View {
         }
     }
 
-    /// Guidance line for the top banner — the stage strings unchanged
-    /// (during the burst it mirrors the under-crosshair capture pill,
-    /// Android parity).
-    private var topBannerText: String? { statusText }
+    private var scanHintKey: String? {
+        guard isAiming, viewModel.state != .idle, !bhGroundPlacementActive else { return nil }
+        return viewModel.segmentationEnabled && !viewModel.edgeAdjustActive ? "dbh.auto" : "dbh.adjust"
+    }
+
+    private var topBannerText: String? {
+        if isAiming, showsAcquisitionHint { return Self.acquisitionStallHint }
+        if isAiming, viewModel.state != .idle, !scanHints.isVisible(scanHintKey) { return nil }
+        // Progress already has a pill at the crosshair.
+        if viewModel.state == .capturing { return nil }
+        return statusText
+    }
 
     @ViewBuilder
     private var bottomPanel: some View {
@@ -2317,7 +2333,7 @@ public struct DBHScanScreen: View {
 
     private var statusText: String {
         if isAiming, viewModel.segmentationEnabled, !viewModel.edgeAdjustActive {
-            return "Keep the trunk in view; tap + when ready, or use Adjust."
+            return "Keep the trunk in view, then tap +."
         }
         switch viewModel.state {
         case .idle:         return "Starting camera…"

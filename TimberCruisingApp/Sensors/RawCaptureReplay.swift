@@ -943,7 +943,11 @@ public enum RawCaptureRecorder {
         topJPEG: Data? = nil,
         baseImageMetadata: RawCapturedImage? = nil,
         topImageMetadata: RawCapturedImage? = nil,
-        captureEvidence: RawCaptureEvidence? = nil
+        captureEvidence: RawCaptureEvidence? = nil,
+        inertial: RawInertialRecording? = nil,
+        anchorFrame: ARDepthFrame? = nil,
+        anchorJPEG: Data? = nil,
+        anchorImageMetadata: RawCapturedImage? = nil
     ) -> RawCaptureOutcome {
         let dir = RawCaptureStore.bundleDirectory(id: id)
         do {
@@ -1033,16 +1037,28 @@ public enum RawCaptureRecorder {
             },
             trackingDropped: trackingDropped)
         manifest.measurementId = id
+        do {
+            manifest.height?.imu = try inertial?.write(id: id,directory: dir)
+            manifest.height?.anchor.frame = try anchorFrame.map { try RawCaptureEvidenceIO.writeFrame($0,role: "anchor",directory: dir) }
+            manifest.height?.anchor.image = try RawCaptureEvidenceIO.attachImage(anchorImageMetadata,data: anchorJPEG,file: nil,role: "anchor",directory: dir)
+            if inertial != nil || anchorFrame != nil || anchorImageMetadata != nil {
+                let rgbStatus = manifest.height?.anchor.image?.file == nil ? "unavailable" : "captured"
+                manifest.height?.anchor.captureStatus = ["depth": anchorFrame == nil ? "unavailable" : "captured",
+                    "rgb": rgbStatus]
+            }
+        } catch { return .failed(reason: message(error)+RawCaptureStore.preserveFailedBundle(id: id)) }
         if var evidence = captureEvidence {
             do {
                 guard evidence.measurementId == id else { throw FieldStudyError.invalid("raw evidence identity") }
                 evidence.frames = try [("base",baseFrame),("top",topFrame)].compactMap { role,frame in
                     try frame.map { try RawCaptureEvidenceIO.writeFrame($0,role: role,directory: dir) }
                 }
+                if let anchor = manifest.height?.anchor.frame { evidence.frames.append(anchor) }
                 evidence.images = try [
                     RawCaptureEvidenceIO.attachImage(baseImageMetadata,data: baseJPEG,file: baseAimExtra?.rgbFile,role: "base",directory: dir),
                     RawCaptureEvidenceIO.attachImage(topImageMetadata,data: topJPEG,file: topAimExtra?.rgbFile,role: "top",directory: dir)
                 ].compactMap { $0 }
+                if let anchor = manifest.height?.anchor.image { evidence.images?.append(anchor) }
                 evidence.scalars = ["alpha_base_rad":Double(basePitchRad),"alpha_top_rad":Double(topPitchRad),
                     "anchor_x":Double(anchorWorld.x),"anchor_y":Double(anchorWorld.y),"anchor_z":Double(anchorWorld.z),
                     "standing_x":Double(baseStanding.x),"standing_y":Double(baseStanding.y),"standing_z":Double(baseStanding.z)]

@@ -277,6 +277,45 @@ object ArSessionHub {
     /// null, and the screen says so — a marker that disappears honestly beats
     /// one that stays put and lies.
     private var heightAnchor: Anchor? = null
+    private val rawHeightClients = mutableSetOf<java.util.UUID>()
+    private var rawHeightLastNative: Long? = null
+    private var rawHeightLastHost = 0L
+    var rawHeightObservation: com.hcjeong.forestix.sensors.RawHeightObservation? = null
+        private set
+    fun armRawHeightEvidence(): java.util.UUID = java.util.UUID.randomUUID().also { rawHeightClients.add(it) }
+    fun releaseRawHeightEvidence(token: java.util.UUID) {
+        rawHeightClients.remove(token)
+        if (rawHeightClients.isEmpty()) { rawHeightObservation = null; rawHeightLastNative = null; rawHeightLastHost = 0 }
+    }
+    fun pollRawHeightObservation(): com.hcjeong.forestix.sensors.RawHeightObservation {
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        val sample = rawHeightObservation
+        if (sample != null && now - sample.observedHostTimestamp.toLong() in 0..500_000_000L) return sample
+        return com.hcjeong.forestix.sensors.RawHeightObservation(
+            sample?.arTimestamp,now.toString(),null,null,"frame_delivery_stale",null,"unknown",
+            sample?.deliveredArTimestamp,sample?.deliveryHostTimestamp,null,System.nanoTime().toString(),"unavailable")
+    }
+    private fun recordRawHeightFrame(frame: Frame) {
+        if (rawHeightClients.isEmpty()) return
+        val host = android.os.SystemClock.elapsedRealtimeNanos()
+        val previous = rawHeightLastNative
+        rawHeightLastNative = frame.timestamp
+        if (host - rawHeightLastHost < 200_000_000L) return
+        rawHeightLastHost = host
+        fun matrix(pose: Pose): List<Double>? = FloatArray(16).also { pose.toMatrix(it,0) }
+            .map { it.toDouble() }.takeIf { it.all { n -> n.isFinite() } }
+        val thermal = if (android.os.Build.VERSION.SDK_INT >= 29)
+            (sceneView?.context?.getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager)
+                ?.currentThermalStatus?.toString() ?: "unknown" else "unavailable_api_below_29"
+        rawHeightObservation = com.hcjeong.forestix.sensors.RawHeightObservation(
+            arTimestamp = frame.timestamp.toString(), observedHostTimestamp = host.toString(),
+            cameraPose = matrix(frame.camera.pose), anchorPose = heightAnchor?.let { matrix(it.pose) },
+            trackingState = frame.camera.trackingState.name, trackingReason = frame.camera.trackingFailureReason.name,
+            thermalState = "PowerManager:$thermal", deliveredArTimestamp = frame.timestamp.toString(),
+            deliveryHostTimestamp = host.toString(),
+            nativeFrameIntervalSeconds = previous?.takeIf { frame.timestamp > it }?.let { (frame.timestamp-it)/1e9 },
+            monotonicHostTimestamp = System.nanoTime().toString(), anchorTrackingState = heightAnchor?.trackingState?.name)
+    }
 
     /// Anchor the trunk at `p` (world) for a height walk-off. Replaces any
     /// previous trunk anchor. False while the session isn't running — no hit
@@ -430,6 +469,10 @@ object ArSessionHub {
     // creating one per rebuild leaked instances for the whole app session.
     private data class ColorKey(val r: Float, val g: Float, val b: Float, val a: Float)
     private val materialCache = HashMap<ColorKey, MaterialInstance>()
+    private var defaultLightDirection: Float3? = null
+    private var defaultLightShadows = false
+    private var markerLightFollowsCamera = false
+    private val markerLightAxis = FloatArray(3)
 
     // MARK: - View / lifecycle plumbing
 
@@ -485,6 +528,8 @@ object ArSessionHub {
             onFrame = { session, frame -> onSessionFrame(session, frame) },
         )
         sceneView = view
+        defaultLightDirection = view.mainLightNode?.lightDirection
+        defaultLightShadows = view.mainLightNode?.isShadowCaster ?: false
         hostActivity = activity
         lifecycleOwner = owner
         activity.lifecycle.addObserver(activityObserver)
@@ -622,6 +667,8 @@ object ArSessionHub {
         plotPoseStaleSinceMs = 0L
         applyPlotTrackingLost(false)
         materialCache.clear()
+        defaultLightDirection = null
+        markerLightFollowsCamera = false
         controller.frame = null
         controller.session = null
     }
@@ -681,6 +728,25 @@ object ArSessionHub {
             controller.viewHeightPx = view.height
         }
         controller.onUpdate(session, frame)
+        recordRawHeightFrame(frame)
+        // Height's distance-scaled opaque spheres need a readable front
+        // hemisphere even when viewed from below. Aim the existing light
+        // along the sight line, retaining rounded shading without creating
+        // any extra material/shader or light objects. Restore other screens.
+        val followsCamera = builtMarkers.any {
+            it.scalesWithDistance && it.shape is MarkerShape.Sphere && it.colorRGBA[3] >= 0.999f
+        }
+        view.mainLightNode?.let { light ->
+            if (followsCamera) {
+                frame.camera.pose.getTransformedAxis(2, 1f, markerLightAxis, 0)
+                light.lightDirection = Float3(-markerLightAxis[0], -markerLightAxis[1], -markerLightAxis[2])
+                if (light.isShadowCaster) light.isShadowCaster = false
+            } else if (markerLightFollowsCamera) {
+                defaultLightDirection?.let { light.lightDirection = it }
+                light.isShadowCaster = defaultLightShadows
+            }
+        }
+        markerLightFollowsCamera = followsCamera
         // Distance-compensated marker scaling (same policy as before the
         // shared-session refactor — see MARKER_SCALE_* docs below).
         if (scalingNodes.isNotEmpty()) {

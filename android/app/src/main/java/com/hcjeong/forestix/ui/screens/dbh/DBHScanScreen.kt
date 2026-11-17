@@ -1531,6 +1531,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
         failure = failure != null || captureRefusal != null,
         initialDepthAcquired = acquiredNow,
     )
+    val scanHintKey = if (stage == Stage.AIMING && !manualOpen && !showDepthMotionHint &&
+        bhGuide.stage != BreastHeightGuide.Stage.AIMING) {
+        if (segmentationOn && !adjustMode) "dbh.auto" else "dbh.adjust"
+    } else null
+    val showScanHint = com.hcjeong.forestix.ui.screens.rememberScanHintVisible(scanHintKey)
 
     // Border chip (D — cruise tally only): live distance to the plot
     // boundary from the AR anchor (|camera→centre| − radius), the sampling
@@ -3261,7 +3266,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 stage == Stage.AIMING -> when {
                     // The animated icon replaces the no-depth-lock text.
                     showDepthMotionHint -> null
-                    segmentationOn && !adjustMode -> "Keep the trunk in view; tap + when ready, or use Adjust."
+                    segmentationOn && !adjustMode -> if (showScanHint) "Keep the trunk in view, then tap +." else null
                     // FIELD REPORT 15, the stuck case: depth delivery has
                     // stopped outright and has been down long enough to
                     // stall. Every line below reads `preview` /
@@ -3288,21 +3293,21 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         // number used to.
                         if(adjustPreview?.depthRejection!=null)adjustPreview?.depthRejection
                         else if (bracketTwoSurfaces && adjustShown == null) BRACKET_TWO_SURFACES
-                        else if (adjustPreview?.locked == true) "Hold steady, then tap + to capture."
+                        else if (adjustPreview?.locked == true) if (showScanHint) "Hold steady, then tap + to capture." else null
                         // Field report 15 — the bracket has been up for
                         // seconds with no depth behind it. Say what clears
                         // it instead of repeating "hold steady", which is
                         // the one thing that does not.
                         else if (acquisitionStalled) null
-                        else "Align the guide to the trunk's uphill side; hold steady."
-                    locked -> "Hold steady, then tap + to capture."
+                        else if (showScanHint) "Align the guide to the trunk's uphill side; hold steady." else null
+                    locked -> if (showScanHint) "Hold steady, then tap + to capture." else null
                     // Border-touch invalidity: the silhouette walk ran off
                     // the image — the trunk's edges aren't in frame, so no
                     // fit can lock. Honest guidance instead of a lock. More
                     // specific than the stall hint, so it wins.
                     preview?.edgesClipped == true -> EDGES_CLIPPED_TEXT
                     acquisitionStalled -> null
-                    else -> "Align the guide to the trunk's uphill side; hold steady."
+                    else -> if (showScanHint) "Align the guide to the trunk's uphill side; hold steady." else null
                 }
                 // Depth burst: the under-crosshair capture pill carries the
                 // progress — no duplicate banner (iOS topBannerText parity).

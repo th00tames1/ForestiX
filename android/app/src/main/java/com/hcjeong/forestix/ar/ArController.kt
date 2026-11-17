@@ -94,6 +94,7 @@ class ArController {
             kotlin.math.atan2(-z[1], sqrt(z[0]*z[0] + z[2]*z[2])),
             camera.trackingState == TrackingState.TRACKING,
             FloatArray(16).also { pose.toMatrix(it, 0) },
+            frame.timestamp,
         ) to received
         if (frame.camera.trackingState != TrackingState.TRACKING) trackedNormalSinceWatch = false
     }
@@ -349,6 +350,7 @@ class ArController {
     data class HeightCameraSnapshot(
         val position: Vec3, val elevationRad: Float,
         val trackingNormal: Boolean, val poseMatrix: FloatArray,
+        val timestampNanos: Long,
     )
 
     /** A sighting reads one copied AR frame, not separately advancing poses. */

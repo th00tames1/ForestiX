@@ -4,6 +4,22 @@
 // Xcode DEVELOPER_DIR; it omits iOS-only UI and binary package dependencies.
 
 import PackageDescription
+import Foundation
+
+// Local research files may coexist with the app checkout. Only these model
+// resources are eligible for distribution; unknown files are excluded, not
+// deleted. Keeping the model optional preserves model-free clone builds.
+let sensorDirectory = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().appendingPathComponent("TimberCruisingApp/Sensors")
+let approvedSensorModels = ["README.md", "yolo26_alignment.onnx"]
+let localSensorModels = (try? FileManager.default.contentsOfDirectory(
+    atPath: sensorDirectory.appendingPathComponent("Models").path)) ?? []
+let excludedSensorPaths = ["MobileBoundaryAligner.swift"].filter {
+    FileManager.default.fileExists(atPath: sensorDirectory.appendingPathComponent($0).path)
+} + localSensorModels.filter { !approvedSensorModels.contains($0) }.map { "Models/\($0)" }
+let sensorModelResources: [Resource] = approvedSensorModels.filter {
+    FileManager.default.fileExists(atPath: sensorDirectory.appendingPathComponent("Models/\($0)").path)
+}.map { .process("Models/\($0)") }
 
 let package = Package(
     name: "TimberCruisingApp",
@@ -104,14 +120,28 @@ let package = Package(
                          condition: .when(platforms: [.iOS]))
             ],
             path: "TimberCruisingApp/Sensors",
-            exclude: ["Models/tree_seg_640.onnx"],
-            resources: [
-                // Process individual files so the private legacy model stays
-                // excluded even when a local research copy exists. ONNX bytes
-                // are copied unchanged; the Auto loader already supports the
-                // bundle root. README keeps model-free clones buildable.
-                .process("Models")
-            ]
+            exclude: excludedSensorPaths,
+            // Explicit production sources prevent newly added local experiment
+            // files from silently becoming app code, even with a cached manifest.
+            sources: [
+                "AIBoundaryProvenance.swift", "ARKitSessionManager.swift",
+                "BoundaryAlignment.swift", "CircleFit/KasaFit.swift",
+                "CircleFit/RANSACCircle.swift", "CircleFit/TaubinFit.swift",
+                "DBHCameraSnapshot.swift", "DBHEstimator.swift",
+                "DBHMeasurementDepth.swift", "DistanceSmoother.swift",
+                "HeightEstimator.swift", "IMUHelpers.swift", "LiDARCalibration.swift",
+                "LiveAutoCadence.swift", "LiveStemTracking.swift", "PLYExporter.swift",
+                "PointCloud/BackProjection.swift", "PointCloud/OutlierRemoval.swift",
+                "RawAIInference.swift", "RawCaptureEvidence.swift",
+                "RawCapturePresentation.swift", "RawCaptureReplay.swift",
+                "RawCaptureStore.swift", "RawCaptureWriteGuard.swift",
+                "RawDepthGridIO.swift", "RawIMUCapture.swift", "RawInertialRecording.swift",
+                "RawOperatorEditJournal.swift", "SamplingStats.swift",
+                "TreePlacementHelper.swift", "TreeSegmenter.swift", "VolumeConversion.swift",
+                "YoloAlignmentMask.swift", "YoloBoundaryAligner.swift",
+                "YoloImagePreparation.swift", "YoloInferenceWorkspace.swift", "YoloModelIdentity.swift"
+            ],
+            resources: sensorModelResources
         ),
 
         // MARK: - Phase 3

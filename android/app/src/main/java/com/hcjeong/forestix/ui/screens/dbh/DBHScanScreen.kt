@@ -105,6 +105,7 @@ import com.hcjeong.forestix.ar.distance
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.MeasurementTargetRange
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.clampBracketHalfWidth
@@ -485,6 +486,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     /// Projected height in AR-view pixels; the ticks and label share it.
     var bhLabelPos by remember { mutableStateOf<Offset?>(null) }
     var bhPlacementFailed by remember { mutableStateOf(false) }
+    var bhTooClose by remember { mutableStateOf(false) }
     // Height preferences never auto-arm placement.
     LaunchedEffect(settings.breastHeightGuideHeight) {
         bhGuide.height = settings.breastHeightGuideHeight
@@ -511,7 +513,10 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 // screenCenterHit, NOT screenCenterAnchorHit: this ray is
                 // aimed DOWN at the ground, and the gated variant exists
                 // specifically to refuse ground planes.
-                BreastHeightGuide.Stage.AIMING -> bhGuide.updateGhost(controller.screenCenterGroundHit())
+                BreastHeightGuide.Stage.AIMING -> {
+                    bhGuide.updateGhost(controller.screenCenterGroundHit())
+                    bhTooClose = controller.lastPlacementRangeRejection == MeasurementTargetRange.Rejection.TOO_CLOSE
+                }
                 BreastHeightGuide.Stage.PLACED -> bhGuide.refresh()
                 else -> {}
             }
@@ -607,6 +612,8 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var autoAlignmentBusy by remember { mutableStateOf(false) }
     var autoAlignmentMessage by remember { mutableStateOf<String?>("Finding stem…") }
     var displayedAutoMessage by remember { mutableStateOf<String?>(null) }
+    var liveDepthRangeMessage by remember { mutableStateOf<String?>(null) }
+    val measuredRangeGuidance = remember { com.hcjeong.forestix.sensors.DbhMeasurementRangeGuidance() }
     var autoSafetyNotice by remember { mutableStateOf<String?>(null) }
     var deviceIsHot by remember { mutableStateOf(false) }
     var inferenceThermallyLimited by remember { mutableStateOf(false) }
@@ -630,10 +637,15 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     }
     LaunchedEffect(segmentationOn, adjustMode) {
         displayedAutoMessage = null
-        if (!segmentationOn || adjustMode) return@LaunchedEffect
+        liveDepthRangeMessage = null
+        measuredRangeGuidance.reset()
         val filter = StableGuidanceMessage(autoAlignmentMessage, SystemClock.elapsedRealtime() / 1000.0)
         while (isActive) {
-            displayedAutoMessage = filter.update(autoAlignmentMessage, SystemClock.elapsedRealtime() / 1000.0)
+            val now = SystemClock.elapsedRealtime()/1000.0
+            liveDepthRangeMessage = if (stage == Stage.AIMING && !depthBlocked && !manualOpen)
+                measuredRangeGuidance.message(now,
+                    settings.unitSystem == UnitSystem.IMPERIAL) else null
+            displayedAutoMessage = if (segmentationOn && !adjustMode) filter.update(autoAlignmentMessage,now) else null
             kotlinx.coroutines.delay(125)
         }
     }
@@ -650,7 +662,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     var snapshotCaptureJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     DisposableEffect(Unit) { onDispose { snapshotCaptureJob?.cancel() } }
     LaunchedEffect(resumed) {
-        if (!resumed) depthReadiness.reset()
+        if (!resumed) {
+            depthReadiness.reset()
+            measuredRangeGuidance.reset()
+            liveDepthRangeMessage = null
+        }
         if (!resumed && snapshotCaptureJob?.isActive == true) {
             snapshotCaptureJob?.cancel(); snapshotCaptureJob = null
             if (stage == Stage.CAPTURING) stage = Stage.AIMING
@@ -1151,6 +1167,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                 val tapY = tap?.second ?: (f.height / 2.0)
                 val axis = DBHEstimator.screenHorizontalGuideAxis(f, tapX, tapY)
                 if (axis == null) {
+                    measuredRangeGuidance.observe(f,null,SystemClock.elapsedRealtime()/1000.0,bracketed=false)
                     preview = null
                     smoothedDiaCm = null
                     cylinderMarker = null
@@ -1199,6 +1216,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                     // Rolling row quorum only continues an established lock.
                     carryWidths = if (preview?.locked == true) carryWidths.flatten() else emptyList(),
                 )
+                measuredRangeGuidance.observe(f,rawFit,SystemClock.elapsedRealtime()/1000.0,bracketed=false)
                 val raw = if (rawFit?.locked == true) {
                     val readiness = depthReadiness.observe(f,axis,rawFit.stripLeftFraction.toDouble(),rawFit.stripRightFraction.toDouble())
                     if(readiness.ready)rawFit else rawFit.copy(locked=false,depthRejection=DbhDepthReadiness.WAIT_MESSAGE)
@@ -1433,6 +1451,9 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         f, adjustLeftFrac * w, adjustRightFrac * w, cy, calibration,
                     )
                 } else null
+                // The exact un-smoothed distance selected by the existing
+                // Auto/Adjust estimate, before UI settling/readiness copies.
+                measuredRangeGuidance.observe(f,spatialPreview,SystemClock.elapsedRealtime()/1000.0,bracketed=true)
                 adjustPreview = if(spatialPreview?.locked==true) {
                     val geometry=DBHEstimator.bracketDepthGeometry(f,adjustLeftFrac*w,adjustRightFrac*w,cy)
                     val readiness=geometry?.let{depthReadiness.observe(f,it.axis,it.leftFraction,it.rightFraction)}
@@ -2473,6 +2494,7 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
     fun placeBreastHeightBase(hit: Vec3?) {
         if (stage != Stage.AIMING || manualOpen || depthBlocked ||
             bhGuide.stage != BreastHeightGuide.Stage.AIMING) return
+        bhTooClose = controller.lastPlacementRangeRejection == MeasurementTargetRange.Rejection.TOO_CLOSE
         bhPlacementFailed = hit == null || !bhGuide.place(hit)
         if (!bhPlacementFailed) {
             hapticView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
@@ -3143,8 +3165,11 @@ fun DBHScanScreen(nav: NavController, chainToHeight: Boolean = false) {
                         if (showBhGuidePill) {
                             // Reserve the same space with or without a message: controls stay put.
                             Box(Modifier.size(width = 260.dp, height = 44.dp), contentAlignment = Alignment.Center) {
+                                val rangeNotice = if (bhGuide.stage == BreastHeightGuide.Stage.AIMING) {
+                                    if (bhTooClose) MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL) else null
+                                } else liveDepthRangeMessage
                                 val guidance = if (deviceIsHot) com.hcjeong.forestix.common.AutoSafetyPolicy.HEAT_MESSAGE
-                                    else autoSafetyNotice ?: displayedAutoMessage
+                                    else rangeNotice ?: autoSafetyNotice ?: displayedAutoMessage
                                 guidance?.let { message ->
                                     Text(message, color = Color.White, fontSize = 11.sp, maxLines = 2,
                                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,

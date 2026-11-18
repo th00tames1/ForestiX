@@ -21,6 +21,7 @@
 //   biased by the initial cruiser-to-tree offset.
 
 import Foundation
+import Common
 
 // The aim-offset instrument that used to live here (an `OpticalAxisProbe`
 // reporting where the lens principal point lands against the view centre) is
@@ -46,6 +47,7 @@ public final class ARCenterRaycaster: ObservableObject {
     /// so the cruiser can compare paths, and it's pinned to `false` on
     /// devices without LiDAR (where the mesh never exists anyway).
     public var preferLiDARMesh: Bool = true
+    public private(set) var lastPlacementRangeRejection: MeasurementTargetRange.Rejection?
 
     public init() {}
 
@@ -142,6 +144,7 @@ public final class ARCenterRaycaster: ObservableObject {
     /// precisely what this refuses. Android keeps both functions for the same
     /// split.
     public func screenCenterAnchorHit(maxDistM: Float) -> SIMD3<Float>? {
+        lastPlacementRangeRejection = nil
         guard let view = arview else { return nil }
         let bounds = view.bounds
         guard bounds.width > 1, bounds.height > 1 else { return nil }
@@ -155,9 +158,13 @@ public final class ARCenterRaycaster: ObservableObject {
         // difference is that a mesh hit BEYOND the gate no longer ends the
         // search: the ray may have skimmed past the trunk into distant
         // reconstruction, and a plane candidate can still be right.
-        if preferLiDARMesh, let mesh = meshRaycastHit(at: center, in: view),
-           simd_distance(cam, mesh) <= maxDistM {
-            return mesh
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: center, in: view) {
+            let reason = MeasurementTargetRange.rejection(distanceMeters: simd_distance(cam, mesh),maximumMeters: maxDistM)
+            if reason == nil { return mesh }
+            lastPlacementRangeRejection = reason
+            // Never see through a too-close foreground surface to a farther
+            // background plane and claim the requested point was accepted.
+            if reason == .tooClose || reason == .unavailable { return nil }
         }
 
         // `.any` alignment, NOT horizontal-then-any: the facing test below is
@@ -168,14 +175,18 @@ public final class ARCenterRaycaster: ObservableObject {
                                 alignment: .any) {
             let t = hit.worldTransform
             let p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-            guard simd_distance(cam, p) <= maxDistM else { continue }
+            if let reason = MeasurementTargetRange.rejection(distanceMeters: simd_distance(cam, p),maximumMeters: maxDistM) {
+                lastPlacementRangeRejection = reason
+                if reason == .tooClose || reason == .unavailable { return nil }
+                continue
+            }
             // +Y of an ARKit raycast result is the surface normal, the same
             // convention as ARCore's `hitPose.yAxis`.
             let n = SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z)
             let ray = p - cam
             let len = simd_length(ray)
             guard len > 1e-4 else { continue }
-            if simd_dot(n, ray / len) <= -0.866 { return p }
+            if simd_dot(n, ray / len) <= -0.866 { lastPlacementRangeRejection = nil; return p }
         }
         return nil
     }
@@ -226,16 +237,17 @@ public final class ARCenterRaycaster: ObservableObject {
     /// Raycast at an ARBITRARY screen point (generalises screenCenterHit).
     public func hit(at screenPoint: CGPoint,
                     intent: SurfaceIntent = .upright) -> SIMD3<Float>? {
+        lastPlacementRangeRejection = nil
         guard let view = arview else { return nil }
         let camera = cameraWorldPosition
 
-        /// Inside the gate? `.ground` refuses anything past six metres; every
-        /// other intent is unchanged. Fails OPEN with no camera pose, because
-        /// a raycast that returned a hit without one is a state this cannot
-        /// reason about and refusing would be worse than allowing.
+        /// Ground placement requires a measured camera-to-hit range. Other
+        /// tools keep their own established policy, including distant sights.
         func withinGate(_ p: SIMD3<Float>) -> Bool {
-            guard intent == .ground, let camera else { return true }
-            return simd_distance(p, camera) <= Self.groundTapMaxM
+            guard intent == .ground else { return true }
+            lastPlacementRangeRejection = MeasurementTargetRange.rejection(
+                distanceMeters: camera.map { simd_distance(p, $0) },maximumMeters: Self.groundTapMaxM)
+            return lastPlacementRangeRejection == nil
         }
 
         // THE MESH PATH IS GATED TOO. It used to return unconditionally, and
@@ -243,9 +255,9 @@ public final class ARCenterRaycaster: ObservableObject {
         // mode — so on exactly the hardware this app is built for, the first
         // thing a ground tap did was take a mesh hit at any range whatsoever
         // and the six-metre rule below never ran once.
-        if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view),
-           withinGate(mesh) {
-            return mesh
+        if preferLiDARMesh, let mesh = meshRaycastHit(at: screenPoint, in: view) {
+            if withinGate(mesh) { return mesh }
+            if lastPlacementRangeRejection == .tooClose || lastPlacementRangeRejection == .unavailable { return nil }
         }
         // GROUND ALSO GETS A DISTANCE GATE, for the reason field round 8
         // documented on the other platform and the height anchor already
@@ -274,7 +286,10 @@ public final class ARCenterRaycaster: ObservableObject {
                                     allowing: .estimatedPlane,
                                     alignment: alignment) {
                 let p = worldTranslation(from: hit)
-                guard withinGate(p) else { continue }
+                guard withinGate(p) else {
+                    if lastPlacementRangeRejection == .tooClose || lastPlacementRangeRejection == .unavailable { return nil }
+                    continue
+                }
                 return p
             }
         }
@@ -785,6 +800,7 @@ public final class ARCenterRaycaster: ObservableObject {
 @MainActor
 public final class ARCenterRaycaster: ObservableObject {
     public var preferLiDARMesh: Bool = true
+    public private(set) var lastPlacementRangeRejection: MeasurementTargetRange.Rejection?
     public init() {}
     public func screenCenterHit() -> SIMD3<Float>? { nil }
     public func screenCenterAnchorHit(maxDistM: Float) -> SIMD3<Float>? { nil }

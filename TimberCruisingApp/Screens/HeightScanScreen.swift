@@ -32,6 +32,7 @@ public struct HeightScanScreen: View {
     @StateObject private var fieldCapture = FieldCaptureCoordinator()
     @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
     @Environment(\.fieldStudyStore) private var fieldStudyStore
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var raycaster = ARCenterRaycaster()
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
@@ -195,6 +196,7 @@ public struct HeightScanScreen: View {
     /// line. nil while the raycast misses (sky, no mesh/plane yet,
     /// tracking not ready), which also counts as "gate not satisfied".
     @State private var anchorAimDistanceM: Float?
+    @State private var anchorTooClose = false
     /// (mesh overlay removed — the Height scan uses the plane/tangent walk-off
     /// and the LiDAR reconstruction wireframe was just visual noise.)
     /// PLACEHOLDER-COMMENT
@@ -490,6 +492,7 @@ public struct HeightScanScreen: View {
         .task(id: anchorAiming) {
             guard anchorAiming else {
                 anchorAimDistanceM = nil
+                anchorTooClose = false
                 return
             }
             while !Task.isCancelled {
@@ -508,6 +511,8 @@ public struct HeightScanScreen: View {
                 } else {
                     anchorAimDistanceM = nil
                 }
+                let tooClose = raycaster.lastPlacementRangeRejection == .tooClose
+                if anchorTooClose != tooClose { anchorTooClose = tooClose }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
@@ -649,6 +654,11 @@ public struct HeightScanScreen: View {
                     // cleared until the value is durable.
                     recordResearchRow(r)
                     applyTypedTruth()
+                    // Match the measurement screen's Back action only AFTER
+                    // its durable save and raw adoption have been confirmed.
+                    // This also finishes a Full measurement without leaving
+                    // its saved Height result waiting for a manual Back tap.
+                    dismiss()
                 }
             }
         }
@@ -1014,7 +1024,7 @@ public struct HeightScanScreen: View {
     /// "+" will actually capture the anchor.
     private var anchorWithinGate: Bool {
         guard let d = anchorAimDistanceM else { return false }
-        return d <= HeightScanViewModel.anchorMaxRangeM
+        return MeasurementTargetRange.rejection(distanceMeters: d,maximumMeters: HeightScanViewModel.anchorMaxRangeM) == nil
     }
 
     /// True for the pre-anchor aiming states — the window in which the
@@ -1042,6 +1052,9 @@ public struct HeightScanScreen: View {
     }
 
     private var statusText: String? {
+        if anchorAiming, anchorTooClose {
+            return MeasurementTargetRange.tooCloseMessage(imperial: settings.unitSystem == .imperial)
+        }
         // Walk-off integrity beats stage guidance: "walk back" is useless
         // advice while the camera has no idea where it is, and the trunk
         // anchor being gone ends the measurement outright. Same precedence
@@ -1870,10 +1883,10 @@ public struct HeightScanScreen: View {
         // grazed ground plane can no longer consume the tap and leave the "+"
         // looking broken. See `ARCenterRaycaster.screenCenterAnchorHit`. The
         // view model's own range gate below is unchanged and still authoritative.
-        viewModel.anchorHereNow(
-            screenCenterHit: raycaster.screenCenterAnchorHit(
-                maxDistM: HeightScanViewModel.anchorMaxRangeM),
-            hitType: hitType)
+        let hit = raycaster.screenCenterAnchorHit(maxDistM: HeightScanViewModel.anchorMaxRangeM)
+        anchorTooClose = raycaster.lastPlacementRangeRejection == .tooClose
+        viewModel.anchorHereNow(screenCenterHit: hit,hitType: hitType,
+            rangeRejection: raycaster.lastPlacementRangeRejection)
     }
 
     /// Push the raw-capture recording config onto the view model (developer

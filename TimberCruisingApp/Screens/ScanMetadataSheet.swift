@@ -204,7 +204,6 @@ public struct SpeciesPickerField: View {
 
     @State private var promptingForCode = false
     @State private var typedCode = ""
-    @State private var browsingSpecies = false
 
     public init(speciesCode: Binding<String?>,
                 unspecifiedLabel: String = "— Unspecified —",
@@ -220,7 +219,6 @@ public struct SpeciesPickerField: View {
 
     public var body: some View {
         Menu {
-            Button("Browse species…") { browsingSpecies = true }
             Button("— Unspecified —") {
                 speciesCode = nil
                 onPick?()
@@ -260,13 +258,6 @@ public struct SpeciesPickerField: View {
             }
         }
         .accessibilityIdentifier("speciesPicker")
-        .sheet(isPresented: $browsingSpecies) {
-            NavigationStack {
-                SpeciesSettingsScreen(catalog: environment.speciesCatalog) { selected in
-                    speciesCode = selected.code; onPick?()
-                }
-            }
-        }
         .alert("Species code", isPresented: $promptingForCode) {
             TextField("Code not in the list", text: $typedCode)
             Button("Cancel", role: .cancel) {}

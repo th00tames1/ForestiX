@@ -906,6 +906,9 @@ public final class HeightScanViewModel: ObservableObject {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
             return
         }
+        // A successful retry supersedes the earlier sighting refusal. Clear
+        // only after all guards pass; missing input must keep its warning.
+        anchorFailureReason = nil
         alphaBaseRad = Float(median)
         // The first tap after walking is the BASE sighting itself. No
         // intermediate Continue tap and no automatic capture while moving.
@@ -934,6 +937,7 @@ public final class HeightScanViewModel: ObservableObject {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
             return
         }
+        anchorFailureReason = nil
         alphaTopRad = Float(median)
         alphaTopSampleCount = pitchBuffer.sampleCount(centeredOn: tapTime)
         topAimedOffset = anchorPointWorld.map { a in
@@ -1006,7 +1010,8 @@ public final class HeightScanViewModel: ObservableObject {
     /// Android uses at the matching point (`HeightScanScreen.kt`, Stage.ANCHOR:
     /// missing hit → inert, missing pose → this banner).
     public func anchorHereNow(screenCenterHit: SIMD3<Float>? = nil,
-                              hitType: String = "unknown") {
+                              hitType: String = "unknown",
+                              rangeRejection: MeasurementTargetRange.Rejection? = nil) {
         if measurementId != nil { guard mayContinueFieldCapture() else { return } }
         guard let id = measurementId ?? beginFieldCapture() else { return }
         var placed = false
@@ -1016,12 +1021,18 @@ public final class HeightScanViewModel: ObservableObject {
                 measurementId = nil
             }
         }
-        guard let anchor = screenCenterHit else { return }
+        guard let anchor = screenCenterHit else {
+            if rangeRejection == .tooClose { anchorFailureReason = MeasurementTargetRange.tooCloseMessage(imperial: unitSystem == .imperial) }
+            return
+        }
         guard let cam = currentCameraTranslation() else {
             anchorFailureReason = Self.cameraNotReadyText
             return
         }
-        guard simd_distance(cam, anchor) <= Self.anchorMaxRangeM else { return }
+        if let reason = MeasurementTargetRange.rejection(distanceMeters: simd_distance(cam, anchor),maximumMeters: Self.anchorMaxRangeM) {
+            if reason == .tooClose { anchorFailureReason = MeasurementTargetRange.tooCloseMessage(imperial: unitSystem == .imperial) }
+            return
+        }
         recordAnchorHitType = hitType
         anchorHere(anchorPointWorld: anchor,
                    standingPointWorld: cam)
@@ -1104,6 +1115,12 @@ public final class HeightScanViewModel: ObservableObject {
             anchorFailureReason = Self.cameraNotReadyText
             return
         }
+        if [screenCenterHit,anchorPointWorld].compactMap({ $0 }).contains(where: {
+            MeasurementTargetRange.rejection(distanceMeters: simd_distance(now,$0)) != nil
+        }) {
+            anchorFailureReason = MeasurementTargetRange.tooCloseMessage(imperial: unitSystem == .imperial)
+            return
+        }
         if let locked = standingPointWorldAtAimTop {
             aimDriftM = simd_distance(locked, now)
         } else {
@@ -1134,6 +1151,12 @@ public final class HeightScanViewModel: ObservableObject {
         }
         guard let p = currentCameraTranslation() else {
             anchorFailureReason = Self.cameraNotReadyText
+            return
+        }
+        if [screenCenterHit,anchorPointWorld].compactMap({ $0 }).contains(where: {
+            MeasurementTargetRange.rejection(distanceMeters: simd_distance(p,$0)) != nil
+        }) {
+            anchorFailureReason = MeasurementTargetRange.tooCloseMessage(imperial: unitSystem == .imperial)
             return
         }
         captureBase(at: nowForPitchBuffer(),

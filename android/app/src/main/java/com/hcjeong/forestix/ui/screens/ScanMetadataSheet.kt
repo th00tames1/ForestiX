@@ -212,7 +212,6 @@ internal fun SpeciesPickerField(
     val options = rememberSpeciesOptions()
     var menuOpen by remember { mutableStateOf(false) }
     var typedCodeOpen by remember { mutableStateOf(false) }
-    var browseOpen by remember { mutableStateOf(false) }
 
     val selectedLabel: AnnotatedString = speciesCode?.let { code ->
         options.firstOrNull { it.first == code }
@@ -266,7 +265,6 @@ internal fun SpeciesPickerField(
             )
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(text = { Text("Browse species…") }, onClick = { menuOpen = false; browseOpen = true })
             DropdownMenuItem(
                 text = { Text("— Unspecified —") },
                 onClick = {
@@ -290,7 +288,6 @@ internal fun SpeciesPickerField(
         }
     }
 
-    if (browseOpen) SpeciesSettingsSheet(onDismiss = { browseOpen = false }, onSelect = { onSpeciesCode(it.code) })
     if (typedCodeOpen) {
         var typed by remember { mutableStateOf(speciesCode.orEmpty()) }
         AlertDialog(

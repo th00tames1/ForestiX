@@ -23,6 +23,7 @@ import com.google.ar.core.TrackingState
 import com.hcjeong.forestix.sensors.ArDepthFrame
 import com.hcjeong.forestix.sensors.DbhDepthInputPolicy
 import com.hcjeong.forestix.sensors.DbhDepthTrace
+import com.hcjeong.forestix.common.MeasurementTargetRange
 import kotlinx.serialization.json.*
 import java.nio.ByteOrder
 import java.util.Locale
@@ -140,6 +141,8 @@ class ArController {
     /// a field run can see WHAT the anchor landed on ("depth 1.62m").
     @Volatile var lastCenterHitInfo: String? = null
         private set
+    @Volatile var lastPlacementRangeRejection: MeasurementTargetRange.Rejection? = null
+        private set
 
     /// Hit the scene at the screen centre. Returns the nearest hit's world
     /// translation, or null when tracking isn't ready / nothing is hit.
@@ -228,16 +231,29 @@ class ArController {
     /// nothing, so a dev-mode field run can see it. iOS
     /// `ARCenterRaycaster.hit(at:intent:.ground)` is the same policy.
     fun screenGroundHit(x: Float, y: Float, maxDistM: Float = GROUND_TAP_MAX_M): Vec3? {
+        lastPlacementRangeRejection = null
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
         val hits = try { f.hitTest(x, y) } catch (_: Throwable) { return null }
         var rejected: String? = null
         for (h in hits) {
             val d = h.distance
+            if (h.trackable is DepthPoint || h.trackable is Plane) {
+                val reason = MeasurementTargetRange.rejection(d,maxDistM)
+                if (reason != null) {
+                    lastPlacementRangeRejection = reason
+                    rejected = String.format(Locale.US,"ground %.2fm %s",d,reason.name)
+                    // Do not skip a near foreground surface and place a
+                    // guide on a farther background plane instead.
+                    if (reason != MeasurementTargetRange.Rejection.TOO_FAR) { lastCenterHitInfo = rejected; return null }
+                    continue
+                }
+            }
             when (val trackable = h.trackable) {
                 is DepthPoint -> {
                     if (d <= maxDistM) {
                         lastCenterHitInfo = String.format(Locale.US, "ground depth %.2fm", d)
+                        lastPlacementRangeRejection = null
                         val t = h.hitPose.translation
                         return Vec3(t[0], t[1], t[2])
                     }
@@ -255,6 +271,7 @@ class ArController {
                         continue
                     }
                     lastCenterHitInfo = String.format(Locale.US, "ground plane %.2fm", d)
+                    lastPlacementRangeRejection = null
                     val t = h.hitPose.translation
                     return Vec3(t[0], t[1], t[2])
                 }
@@ -277,6 +294,7 @@ class ArController {
     /// anchor. `lastCenterHitInfo` reports what was accepted, or the first
     /// rejection with its reason ("plane 31.2m rejected") for the dev HUD.
     fun screenCenterAnchorHit(maxDistM: Float): Vec3? {
+        lastPlacementRangeRejection = null
         if (!ready()) { lastCenterHitInfo = null; return null }
         val f = frame ?: return null
         val hits = try { f.hitTest(viewWidthPx / 2f, viewHeightPx / 2f) } catch (_: Throwable) { return null }
@@ -285,10 +303,20 @@ class ArController {
         for (h in hits) {
             val trackable = h.trackable
             val d = h.distance
+            if (trackable is DepthPoint || trackable is Plane) {
+                val reason = MeasurementTargetRange.rejection(d,maxDistM)
+                if (reason != null) {
+                    lastPlacementRangeRejection = reason
+                    rejected = String.format(Locale.US,"anchor %.2fm %s",d,reason.name)
+                    if (reason != MeasurementTargetRange.Rejection.TOO_FAR) { lastCenterHitInfo = rejected; return null }
+                    continue
+                }
+            }
             when (trackable) {
                 is DepthPoint -> {
                     if (d <= maxDistM) {
                         lastCenterHitInfo = String.format(Locale.US, "depth %.2fm", d)
+                        lastPlacementRangeRejection = null
                         val t = h.hitPose.translation
                         return Vec3(t[0], t[1], t[2])
                     }
@@ -309,6 +337,7 @@ class ArController {
                     val dot = (n[0] * rx + n[1] * ry + n[2] * rz) / len
                     if (dot <= -0.866f) {
                         lastCenterHitInfo = String.format(Locale.US, "plane %.2fm", d)
+                        lastPlacementRangeRejection = null
                         return Vec3(t[0], t[1], t[2])
                     }
                     if (rejected == null) rejected = String.format(Locale.US, "plane %.1fm oblique", d)

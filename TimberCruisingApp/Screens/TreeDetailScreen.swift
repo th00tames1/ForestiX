@@ -1091,7 +1091,6 @@ struct TreeFormSpeciesRows: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var environment: AppEnvironment
-    @State private var browsingSpecies = false
 
     /// What the cruiser CHOSE, once they have chosen. nil means they have not,
     /// and the free-text row is decided by the stored code instead — a code
@@ -1122,14 +1121,6 @@ struct TreeFormSpeciesRows: View {
             Text("Other code…").tag(Self.otherTag)
         }
         .accessibilityIdentifier("\(identifierPrefix).speciesPicker")
-        Button("Browse species…") { browsingSpecies = true }
-            .sheet(isPresented: $browsingSpecies) {
-                NavigationStack {
-                    SpeciesSettingsScreen(catalog: environment.speciesCatalog) { selected in
-                        code = selected.code; freeTextChoice = false; onEdited()
-                    }
-                }
-            }
 
         // Escape hatch: a code the country/region list doesn't carry. Typing
         // here stores the code verbatim.

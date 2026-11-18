@@ -33,6 +33,7 @@ public struct DBHScanScreen: View {
     @StateObject private var fieldCapture = FieldCaptureCoordinator()
     @StateObject private var fieldTargetSwitch = FieldTargetSwitchCoordinator()
     @Environment(\.fieldStudyStore) private var fieldStudyStore
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var settings: AppSettings
     /// App-scoped active sampling plot — rendered as a subdued ring +
@@ -163,7 +164,9 @@ public struct DBHScanScreen: View {
     /// point is behind the camera or nothing is anchored.
     @State private var bhLabelPoint: CGPoint?
     @State private var bhPlacementFailed = false
+    @State private var bhTooClose = false
     @State private var displayedAutoMessage: String?
+    @State private var liveDepthRangeMessage: String?
     @State private var autoSafetyNotice: String?
     @State private var deviceIsHot = false
 
@@ -828,6 +831,7 @@ public struct DBHScanScreen: View {
                     // refuse — or worse, agrees with it and shows a base 30 m
                     // away as if it were fine.
                     bhGuide.updateGhost(raycaster.screenCenterGroundHit())
+                    bhTooClose = raycaster.lastPlacementRangeRejection == .tooClose
                 case .placed:
                     bhGuide.refresh(using: viewModel.session)
                 }
@@ -1144,6 +1148,14 @@ public struct DBHScanScreen: View {
                             tallyToastLabel = saved
                         }
                         tallyToastGeneration += 1
+                    } else {
+                        // Finish from inside the presented screen too. The
+                        // map's binding alone may not refresh its off-screen
+                        // UIKit presenter until the cruiser presses Back.
+                        // Its onDismiss then starts Height for a saved Full
+                        // measurement. A failed store returns above; a cruise
+                        // tally deliberately stays open for the next tree.
+                        dismiss()
                     }
                 }
             }
@@ -1694,7 +1706,10 @@ public struct DBHScanScreen: View {
     /// A fixed slot prevents guidance changes from moving the ground/shutter buttons.
     private var autoMessageSlot: some View {
         ZStack {
-            if let message = deviceIsHot ? AutoSafetyPolicy.heatMessage : (autoSafetyNotice ?? displayedAutoMessage) {
+            let rangeNotice = bhGroundPlacementActive
+                ? (bhTooClose ? MeasurementTargetRange.tooCloseMessage(imperial: settings.unitSystem == .imperial) : nil)
+                : liveDepthRangeMessage
+            if let message = deviceIsHot ? AutoSafetyPolicy.heatMessage : (rangeNotice ?? autoSafetyNotice ?? displayedAutoMessage) {
                 Text(message).font(.caption2).foregroundStyle(.white)
                     .multilineTextAlignment(.center).lineLimit(2)
                     .padding(6)
@@ -1705,12 +1720,16 @@ public struct DBHScanScreen: View {
         .allowsHitTesting(false)
         .task(id: viewModel.edgeAdjustActive) {
             displayedAutoMessage = nil
-            guard !viewModel.edgeAdjustActive else { return }
+            liveDepthRangeMessage = nil
             var filter = StableGuidanceMessage(initial: viewModel.autoAlignmentMessage,
                                                 now: ProcessInfo.processInfo.systemUptime)
             while !Task.isCancelled {
-                let next = filter.update(viewModel.autoAlignmentMessage,
-                                         now: ProcessInfo.processInfo.systemUptime)
+                let now = ProcessInfo.processInfo.systemUptime
+                // Range warnings bypass the AI text debounce, and expire when
+                // depth stops. An old near reading must not linger on screen.
+                let range = viewModel.liveDepthRangeMessage(now: now)
+                if liveDepthRangeMessage != range { liveDepthRangeMessage = range }
+                let next = viewModel.edgeAdjustActive ? nil : filter.update(viewModel.autoAlignmentMessage, now: now)
                 if displayedAutoMessage != next { displayedAutoMessage = next }
                 do { try await Task.sleep(for: .milliseconds(125)) }
                 catch { return }
@@ -1823,6 +1842,7 @@ public struct DBHScanScreen: View {
         } else {
             hit = raycaster.screenCenterGroundHit()
         }
+        bhTooClose = raycaster.lastPlacementRangeRejection == .tooClose
         guard let hit, bhGuide.place(hit: hit, using: viewModel.session) else {
             bhPlacementFailed = true
             return

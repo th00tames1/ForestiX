@@ -79,6 +79,7 @@ import com.hcjeong.forestix.ar.Vec3
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
+import com.hcjeong.forestix.common.MeasurementTargetRange
 import com.hcjeong.forestix.common.Units
 import com.hcjeong.forestix.data.MeasureKind
 import com.hcjeong.forestix.data.QuickMeasureEntry
@@ -361,6 +362,7 @@ fun HeightScanScreen(
     // Live anchor-aim validity (gated hit available?) — drives the locked
     // "Move closer" status line and keeps the anchor "+" inert.
     var anchorAimOk by remember { mutableStateOf(false) }
+    var anchorTooClose by remember { mutableStateOf(false) }
     // Walk-off integrity. `trackingLive` is the CURRENT camera state (drives
     // the live "hold still" line); `trackingDropped` latches for the whole
     // measurement, because a dropout that has since recovered still means the
@@ -730,6 +732,7 @@ fun HeightScanScreen(
         if (stage != Stage.ANCHOR) return@LaunchedEffect
         while (true) {
             anchorAimOk = controller.screenCenterAnchorHit(ANCHOR_MAX_M) != null
+            anchorTooClose = controller.lastPlacementRangeRejection == MeasurementTargetRange.Rejection.TOO_CLOSE
             devHitInfo = controller.lastCenterHitInfo
             delay(250)
         }
@@ -1006,7 +1009,9 @@ fun HeightScanScreen(
                 // within 4 m only. No valid hit → the "+" is INERT — the
                 // status line already shows the locked "Move closer" copy.
                 val hit = controller.screenCenterAnchorHit(ANCHOR_MAX_M) ?: run {
-                    fieldCapture.refuse(id, "no_anchor_hit"); return
+                    anchorTooClose = controller.lastPlacementRangeRejection == MeasurementTargetRange.Rejection.TOO_CLOSE
+                    if (anchorTooClose) failure = MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL)
+                    fieldCapture.refuse(id, if (anchorTooClose) "target_too_close" else "no_anchor_hit"); return
                 }
                 // BOTH walk-panel reference values come from the camera pose,
                 // and they are read BEFORE the anchor is placed so a refusal
@@ -1032,6 +1037,17 @@ fun HeightScanScreen(
                     failure = CAMERA_NOT_READY
                     fieldCapture.refuse(id, "no_camera_pose")
                     return
+                }
+                val anchorDistance = MeasurementTargetRange.distance(standing.x,standing.y,standing.z,hit.x,hit.y,hit.z)
+                val anchorRangeFailure = MeasurementTargetRange.rejection(anchorDistance,ANCHOR_MAX_M)
+                if (anchorRangeFailure != null) {
+                    failure = when (anchorRangeFailure) {
+                        MeasurementTargetRange.Rejection.TOO_CLOSE -> MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL)
+                        MeasurementTargetRange.Rejection.TOO_FAR -> "Move closer — stand within " +
+                            MeasurementFormatter.guidanceDistance(ANCHOR_MAX_M.toDouble(),settings.unitSystem) + " of the trunk, then tap +."
+                        MeasurementTargetRange.Rejection.UNAVAILABLE -> CAMERA_NOT_READY
+                    }
+                    fieldCapture.refuse(id,"target_range_changed"); return
                 }
                 // Pin the trunk with a REAL ARCore anchor rather than keeping
                 // the hit's raw world point (see ArSessionHub.heightAnchor for
@@ -1098,6 +1114,10 @@ fun HeightScanScreen(
                 if (a == null || s == null) {
                     failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "base", "no_camera_pose"); return
                 }
+                if (MeasurementTargetRange.rejection(MeasurementTargetRange.distance(s.x,s.y,s.z,anchor.x,anchor.y,anchor.z)) != null) {
+                    failure = MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL)
+                    fieldCapture.stageRefused(id,"base","target_too_close"); return
+                }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
                 failure = null; alphaBase = a
@@ -1150,6 +1170,11 @@ fun HeightScanScreen(
                 val standing = standingNow(); val aBase = alphaBase
                 if (aTop == null || standing == null || aBase == null) {
                     failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "top", "no_camera_pose"); return
+                }
+                val currentPosition = sighting.position
+                if (MeasurementTargetRange.rejection(MeasurementTargetRange.distance(currentPosition.x,currentPosition.y,currentPosition.z,anchor.x,anchor.y,anchor.z)) != null) {
+                    failure = MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL)
+                    fieldCapture.stageRefused(id,"top","target_too_close"); return
                 }
                 failure = null; alphaTop = aTop
                 // Sampled HERE, immediately after the angle and BEFORE the
@@ -1920,7 +1945,8 @@ fun HeightScanScreen(
                     // anchored, not a preference. The SENTENCE follows the
                     // cruiser's units, and reads the same constant the gate
                     // does.
-                    "Move closer — stand within " +
+                    if (anchorTooClose) MeasurementTargetRange.tooCloseMessage(settings.unitSystem == UnitSystem.IMPERIAL)
+                    else "Move closer — stand within " +
                         MeasurementFormatter.guidanceDistance(
                             ANCHOR_MAX_M.toDouble(), settings.unitSystem) +
                         " of the trunk, then tap +."

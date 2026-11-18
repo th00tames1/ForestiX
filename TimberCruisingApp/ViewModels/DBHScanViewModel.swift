@@ -285,6 +285,28 @@ public final class DBHScanViewModel: ObservableObject {
 
     @Published public private(set) var autoAlignmentBusy = false
     @Published public private(set) var autoAlignmentMessage: String?
+    /// Independent of mask acquisition: a missing stem must not hide an
+    /// out-of-range depth reading. Reads the existing frame, without copying it.
+    public func liveDepthRangeMessage(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> String? {
+        guard state == .idle || state == .aligning || state == .armed || state == .rejected,
+              !autoAlignmentPaused, let frame = session.latestDepthFrame,
+              orientationRefusal(for: frame) == nil else { return nil }
+        return Self.depthRangeMessage(frame: frame, viewSize: viewSize, now: now,
+                                      imperial: unitSystem == .imperial)
+    }
+
+    static func depthRangeMessage(frame: ARDepthFrame, viewSize: CGSize, now: TimeInterval,
+                                  imperial: Bool) -> String? {
+        guard viewSize.width.isFinite, viewSize.height.isFinite,
+              viewSize.width > 1, viewSize.height > 1, let mapping = frame.viewMapping else { return nil }
+        let p = mapping.viewToDepth(x: viewSize.width/2, y: viewSize.height/2)
+        let distance = DBHRangeGuidance.median(centerX: p.x, centerY: p.y,
+            width: frame.width, height: frame.height) { x,y in
+                frame.confidence(atX: x,y: y) >= 1 ? frame.depth(atX: x,y: y) : 0
+            }
+        return DBHRangeGuidance.message(distanceMeters: distance, ageSeconds: now-frame.timestamp, imperial: imperial)
+    }
+
     @Published public private(set) var liveStemMask: LiveStemMask?
     @Published public private(set) var liveStemGuideExtent: StemExtent?
     public var autoAlignmentPaused = false {

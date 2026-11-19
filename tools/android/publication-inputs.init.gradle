@@ -1,0 +1,39 @@
+// Diagnostic-only task: inspect actual Gradle compiler inputs, not text matches.
+// Run with --no-configuration-cache -I tools/android/publication-inputs.init.gradle.
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.project(':app')
+    // Deliberately invalid synthetic Kotlin must never reach either compiler.
+    // It lives only in build output, not in the application's source checkout.
+    def probeRoot = new File(app.buildDir, 'tmp/publication-probe')
+    def probe = new File(probeRoot, 'com/hcjeong/forestix/sensors/UnapprovedPublicationProbe.kt')
+    probe.parentFile.mkdirs()
+    probe.text = 'This synthetic unapproved source must not compile!\n'
+    ['Debug', 'Release'].each { variant ->
+        app.tasks.named("compile${variant}Kotlin").configure { source(probeRoot) }
+    }
+    app.tasks.register('writePublicationInputs') {
+        dependsOn app.tasks.named('preparePublicationAssets')
+        doLast {
+            def root = app.rootProject.projectDir.parentFile
+            def sourceLists = [:]
+            def probesExcluded = [:]
+            ['Debug', 'Release'].each { variant ->
+                def sources = app.tasks.named("compile${variant}Kotlin").get().sources.files
+                probesExcluded[variant.toLowerCase()] = !sources.contains(probe)
+                sourceLists[variant.toLowerCase()] = sources
+                    .findAll { it.isFile() && it.toPath().startsWith(new File(app.projectDir, 'src/main').toPath()) }
+                    .collect { root.toPath().relativize(it.toPath()).toString().replace('\\', '/') }.sort()
+            }
+            def assetsRoot = new File(app.buildDir, 'generated/publication/assets')
+            def assets = app.fileTree(assetsRoot).files.collect {
+                assetsRoot.toPath().relativize(it.toPath()).toString().replace('\\', '/')
+            }.sort()
+            def output = new File(app.buildDir, 'reports/publication-inputs.json')
+            output.parentFile.mkdirs()
+            output.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+                sources: sourceLists, assets: assets, syntheticProbesExcluded: probesExcluded
+            ])) + '\n'
+            println "Publication compiler inputs and assets: ${output}"
+        }
+    }
+}

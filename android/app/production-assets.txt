@@ -1,0 +1,7 @@
+# Main application assets only. Model-free clones retain the fallback path.
+SpeciesDefaults.json
+SpeciesDefaultsMetric.json
+VolumeEquationsMetric.json
+VolumeEquationsPNW.json
+models/README.md
+models/yolo26_alignment.onnx

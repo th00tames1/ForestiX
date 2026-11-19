@@ -5,6 +5,31 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// Publishing must not depend on whether local research files happen to exist.
+// Explicit allowlists keep experimental sensor sources and assets out of all
+// application builds without deleting the local originals.
+class UnapprovedSensorSource(private val approved: Set<String>) :
+    org.gradle.api.specs.Spec<org.gradle.api.file.FileTreeElement>, java.io.Serializable {
+    override fun isSatisfiedBy(entry: org.gradle.api.file.FileTreeElement): Boolean {
+        if (entry.isDirectory) return false
+        val relative = entry.file.invariantSeparatorsPath
+            .substringAfter("/com/hcjeong/forestix/sensors/", "")
+        return relative.isNotEmpty() && relative !in approved
+    }
+}
+
+val approvedSensorSources = file("production-sensor-sources.txt").readLines()
+    .map(String::trim).filter { it.isNotEmpty() && !it.startsWith("#") }.toSet()
+val approvedApplicationAssets = file("production-assets.txt").readLines()
+    .map(String::trim).filter { it.isNotEmpty() && !it.startsWith("#") }.toSet()
+val sensorSourceExclusion = UnapprovedSensorSource(approvedSensorSources)
+val publicAssetsDirectory = layout.buildDirectory.dir("generated/publication/assets")
+val preparePublicationAssets by tasks.registering(Sync::class) {
+    from("src/main/assets") { include(approvedApplicationAssets) }
+    into(publicAssetsDirectory)
+    includeEmptyDirs = false
+}
+
 android {
     namespace = "com.hcjeong.forestix"
     // 35: androidx.core 1.16 (transitive via the 16 KB-aligned deps)
@@ -39,6 +64,11 @@ android {
 
     buildFeatures { compose = true }
 
+    sourceSets.getByName("main") {
+        java.exclude(sensorSourceExclusion)
+        assets.setSrcDirs(listOf(publicAssetsDirectory))
+    }
+
     // Public application bundles must never carry the retired private BSI model.
     // Retain AGP 8.7's standard ignore list when adding our model exclusion.
     androidResources {
@@ -59,6 +89,15 @@ android {
         jniLibs { useLegacyPackaging = false }
     }
 }
+
+kotlin.sourceSets.getByName("main").kotlin.exclude(sensorSourceExclusion)
+// The Android Kotlin plugin also collects Java source directories directly.
+// Apply the same rule at the application compiler boundary for every variant;
+// test compilations remain untouched.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    if (!name.contains("Test")) exclude(sensorSourceExclusion)
+}
+tasks.named("preBuild") { dependsOn(preparePublicationAssets) }
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.09.02")

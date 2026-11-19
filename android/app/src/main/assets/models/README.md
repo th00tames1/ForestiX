@@ -5,10 +5,16 @@ The current Auto DBH path uses `yolo26_alignment.onnx` through
 remain excluded from Git. A build without that model keeps the existing
 unavailable/fallback behavior.
 
-`tree_seg_640.onnx` is a retired private BSI research model. It is not used by
-the current Auto path and must not be distributed with ForestiX. The Android
-build excludes that filename from every variant even if a local research copy
-is present. The exclusion does not delete the local file.
+`android/app/production-assets.txt` explicitly lists the allowed application
+assets. Only this README and `yolo26_alignment.onnx` are permitted in `models/`.
+The build stages approved assets in its generated output directory; it never
+copies the local model directory wholesale or deletes local research files.
 
-Before publishing an APK, check that `assets/models/tree_seg_640.onnx` is absent
-and that the intended `assets/models/yolo26_alignment.onnx` is present.
+The retired private BSI model `tree_seg_640.onnx`, experimental MobileSAM model
+`mobilesam_alignment.onnx`, and experimental license/provenance files are not
+packaged. `android/app/production-sensor-sources.txt` also explicitly lists the
+production sensor code, so `MobileBoundaryAligner.kt` and new local sensor
+experiments are not compiled. Add new production files to the relevant list.
+
+Before publishing an APK, verify that `assets/models/yolo26_alignment.onnx`
+is its only ONNX model and that its SHA-256 matches the intended local model.

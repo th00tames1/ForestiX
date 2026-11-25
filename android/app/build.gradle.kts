@@ -40,7 +40,9 @@ android {
         applicationId = "com.hcjeong.forestix"
         minSdk = 26          // ARCore minimum; matches "modern device" target
         targetSdk = 34
-        versionCode = 1
+        // Increment for each distributed APK. Its GitHub release tag is
+        // android-work-build-<versionCode> (test) or android-build-<versionCode> (stable).
+        versionCode = 2
         versionName = "1.0"
 
         vectorDrawables { useSupportLibrary = true }
@@ -62,7 +64,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 
     sourceSets.getByName("main") {
         java.exclude(sensorSourceExclusion)

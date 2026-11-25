@@ -21,6 +21,9 @@
 
 package com.hcjeong.forestix.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +70,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
+import com.hcjeong.forestix.BuildConfig
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.backup.BackupViewModel
 import com.hcjeong.forestix.common.Country
@@ -90,7 +94,9 @@ import com.hcjeong.forestix.ui.shareFile
 import com.hcjeong.forestix.ui.theme.Forestix
 import com.hcjeong.forestix.ui.theme.ForestixBorderedButton
 import com.hcjeong.forestix.ui.theme.ForestixSpace
+import com.hcjeong.forestix.updates.ApkUpdates
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -450,6 +456,8 @@ fun SettingsScreen(nav: NavController) {
                     )
                 }
             }
+
+            AppUpdatesSection()
 
             // MARK: - 6. Developer & research (hidden until the map's seven-tap
             // gesture enables it; when on it holds ALL dev /
@@ -868,6 +876,55 @@ fun SettingsScreen(nav: NavController) {
                 TextButton(onClick = { resetError = null }) { Text("OK") }
             },
         )
+    }
+}
+
+@Composable
+private fun AppUpdatesSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var update by remember { mutableStateOf<ApkUpdates.Build?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    FormSection(header = "App updates") {
+        Text("Installed: ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+            style = Forestix.type.caption, color = Forestix.colors.textSecondary)
+        val next = update
+        ForestixBorderedButton(
+            label = when {
+                checking -> "Checking…"
+                next != null -> "Download update (build ${next.code})"
+                else -> "Check for updates"
+            },
+            enabled = !checking, modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (next != null) {
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(next.url)).apply {
+                        addCategory(Intent.CATEGORY_BROWSABLE)
+                    })
+                    status = null
+                } catch (_: ActivityNotFoundException) {
+                    status = "No browser is available to download the update."
+                }
+            } else if (!checking) {
+                checking = true
+                status = null
+                scope.launch {
+                    try {
+                        update = ApkUpdates.available(BuildConfig.DEBUG, BuildConfig.VERSION_CODE)
+                        if (update == null) status = "No newer build is available."
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        status = "Couldn’t check for updates. Try again when you’re online."
+                    } finally {
+                        checking = false
+                    }
+                }
+            }
+        }
+        status?.let { Text(it, style = Forestix.type.caption, color = Forestix.colors.textSecondary) }
     }
 }
 

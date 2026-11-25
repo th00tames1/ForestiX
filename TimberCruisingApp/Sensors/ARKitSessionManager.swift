@@ -352,6 +352,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// actually converted — see `depthMinIntervalSec`.
     private struct StreamGate {
         var depth: Bool
+        var heightID: UUID?
         var lastDepthConversion: TimeInterval = 0
     }
     private let streamGate = OSAllocatedUnfairLock(
@@ -551,7 +552,8 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
             config.sceneReconstruction = .mesh
         }
         streamGate.withLock {
-            $0 = StreamGate(depth: cfg.depthStream)
+            $0.depth = cfg.depthStream
+            $0.lastDepthConversion = 0 // The existing height anchor survives pause/resume.
         }
         // Drop stale stream values the new screen will never refresh —
         // a DBH HUD must not read a depth frame captured minutes ago.
@@ -585,6 +587,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         // Held so removal never depends on a live frame — see
         // `removeWorldAnchor`.
         addedAnchors[anchor.identifier] = anchor
+        if name == "forestix.heightAnchor" { streamGate.withLock { $0.heightID = anchor.identifier } }
         return anchor.identifier
     }
 
@@ -599,6 +602,11 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// id to reclaim it. Cleared on removal; at most a handful of entries (the
     /// plot centre and the trunk).
     private var addedAnchors: [UUID: ARAnchor] = [:]
+    private var heightFrameReference: (UUID, SIMD3<Float>, TimeInterval)?
+    public func heightReference(id: UUID, timestamp: TimeInterval) -> SIMD3<Float>? {
+        guard hasLiveFrame, let r = heightFrameReference, r.0 == id, r.2 == timestamp else { return nil }
+        return r.1
+    }
 
     /// Remove a previously added world anchor. No-op when the anchor no
     /// longer exists (session recreated, already removed).
@@ -609,6 +617,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
     /// the session just paused would leak the anchor — which is the exact
     /// bug the `addedAnchors` table above was added to fix.
     public func removeWorldAnchor(id: UUID) {
+        streamGate.withLock { if $0.heightID == id { $0.heightID = nil } }
         if let anchor = addedAnchors.removeValue(forKey: id) {
             session.remove(anchor: anchor)
             return
@@ -856,11 +865,19 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
         // was removed and the property had no readers at all, so the copy and
         // the main-actor publish behind it ran on every frame of every DBH
         // scan for nothing. Both are gone.
-        let convertDepth = streamGate.withLock { g -> Bool in
+        let (convertDepth, heightID) = streamGate.withLock { g -> (Bool, UUID?) in
             let convert = g.depth
                 && frame.timestamp - g.lastDepthConversion >= Self.depthMinIntervalSec
             if convert { g.lastDepthConversion = frame.timestamp }
-            return convert
+            return (convert, g.heightID)
+        }
+        // A later currentFrame can already be in a different world frame.
+        // Pair the trunk and camera before dispatch; other screens do no anchor lookup.
+        let heightReference = heightID.flatMap { id -> (UUID, SIMD3<Float>,TimeInterval)? in
+            guard case .normal = frame.camera.trackingState,
+                  let a = frame.anchors.first(where: { $0.identifier == id }) else { return nil }
+            let c = a.transform.columns.3
+            return (id, SIMD3<Float>(c.x,c.y,c.z),frame.timestamp)
         }
         let vp = viewport.withLock { $0 }
         let converted = convertDepth
@@ -887,6 +904,7 @@ public final class ARKitSessionManager: NSObject, ObservableObject, ARSessionDel
                 self.rawFrameInterval = self.cameraPositionTimestamp.flatMap { cameraTimestamp > $0 ? cameraTimestamp - $0 : nil }
                 self.rawDeliveryHost = ProcessInfo.processInfo.systemUptime
             }
+            self.heightFrameReference = heightReference
             self.cameraPositionTimestamp = cameraTimestamp
             if let converted,
                converted.viewportRevision == self.currentViewportRevision {
@@ -1098,6 +1116,7 @@ public final class ARKitSessionManager: ObservableObject {
     public func worldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
     public func worldAnchorExists(id: UUID) -> Bool { false }
     public func trackedWorldAnchorPosition(id: UUID) -> SIMD3<Float>? { nil }
+    public func heightReference(id: UUID, timestamp: TimeInterval) -> SIMD3<Float>? { nil }
     public func currentCameraPixelBuffer() -> CVPixelBuffer? { nil }
     public func currentCameraInputSnapshot() -> RawCameraInput? { nil }
     public func captureDBHSnapshot() -> DBHCameraSnapshot? { nil }

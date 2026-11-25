@@ -72,10 +72,13 @@ import kotlinx.coroutines.launch
 import androidx.navigation.NavController
 import com.hcjeong.forestix.LocalAppEnvironment
 import com.hcjeong.forestix.ar.ArCameraView
+import com.hcjeong.forestix.ar.ArController
 import com.hcjeong.forestix.ar.ArSceneMarker
 import com.hcjeong.forestix.ar.ArSessionHub
 import com.hcjeong.forestix.ar.MarkerShape
 import com.hcjeong.forestix.ar.Vec3
+import com.hcjeong.forestix.common.CameraPoseSpeedGuard
+import com.hcjeong.forestix.common.CameraPoseSpeedGuard.Verdict
 import com.hcjeong.forestix.common.MeasurementFormatter
 import com.hcjeong.forestix.common.TruthInput
 import com.hcjeong.forestix.common.UnitSystem
@@ -201,7 +204,7 @@ private const val TRUTH_NO_BUNDLE_OWNER = "no-bundle"
 private const val TRACKING_LOST_NOW =
     "Tracking lost — hold still until the camera picks the scene back up. The distance is frozen, not restarted."
 private const val TRACKING_DROPPED_DURING_WALK =
-    "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
+    "Tracking was interrupted during the walk."
 private const val ANCHOR_LOST =
     "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
 
@@ -345,19 +348,8 @@ fun HeightScanScreen(
     // (starts at 0.00 — the old single readout confusingly opened at the
     // full anchor distance). Total distance = dhLive (the d_h the math uses).
     var anchorInitialDistM by remember { mutableStateOf<Float?>(null) }
-    // DELIBERATELY A RAW Vec3, not an ARCore `Anchor`, unlike the trunk. The
-    // argument for anchoring the trunk is that its position enters d_h and d_h
-    // is the whole scale of H, so every world-frame correction the walk
-    // collects lands in the measurement. This point enters NOTHING: it feeds
-    // the "Walked back" readout and only that. A relocalization will still
-    // shift it, and the readout will still be off by the correction — so it is
-    // a DISPLAY number, and it is labelled as one here rather than being made
-    // to look like a measurement. Anchoring it would mean a second anchor with
-    // its own detach path on every exit, retake and re-anchor, i.e. another
-    // thing that can leak, bought for a line of chrome. The distance the
-    // cruiser actually acts on is "Total distance", measured to the anchored
-    // trunk. Same call, same wording, on iOS (`cameraPositionAtAnchor`).
-    var standingAtAnchor by remember { mutableStateOf<Vec3?>(null) }
+    // Use the same trunk-relative origin as iOS, including for the walking readout.
+    var initialStandingOffset by remember { mutableStateOf<Vec3?>(null) }
     var walkedLive by remember { mutableStateOf(0f) }
     // Live anchor-aim validity (gated hit available?) — drives the locked
     // "Move closer" status line and keeps the anchor "+" inert.
@@ -372,13 +364,30 @@ fun HeightScanScreen(
     var trackingLive by remember { mutableStateOf(true) }
     var trackingDropped by remember { mutableStateOf(false) }
     var anchorLost by remember { mutableStateOf(false) }
-    /// The camera pose moved faster than a cruiser can walk — see POSE_JUMPED.
-    /// Latched, and as fatal as `anchorLost`: d_h is frozen at a distance that
-    /// belongs to a world frame nothing is standing behind any more.
-    var poseJumped by remember { mutableStateOf(false) }
-    val poseSpeedGuard = remember { com.hcjeong.forestix.common.CameraPoseSpeedGuard() }
+    // One-frame quarantine or a latched retake. Only USABLE may drive a measurement.
+    var poseState by remember { mutableStateOf(Verdict.IGNORED) }
+    val poseSpeedGuard = remember { CameraPoseSpeedGuard() }
+    val checkingText = "Stay here and hold steady while the distance is checked."
     var result by remember { mutableStateOf<HeightResult?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
+    val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
+    val rawIMU = remember(rawCaptureArmed) { if (rawCaptureArmed) com.hcjeong.forestix.sensors.RawIMUCapture(context) else null }
+    fun publishPoseState(timestamp: Long? = null) {
+        if (poseState == poseSpeedGuard.state) return
+        val prior = poseState
+        poseState = poseSpeedGuard.state
+        if (poseState == Verdict.CHECKING) rawIMU?.mark("walk_pose_checking", timestamp)
+        if (prior == Verdict.CHECKING && poseState == Verdict.USABLE) rawIMU?.mark("walk_pose_recovered", timestamp)
+        if (poseState == Verdict.RETAKE) rawIMU?.mark("walk_pose_retake", timestamp)
+        if (poseState != Verdict.CHECKING && failure == checkingText)
+            failure = if (poseState == Verdict.RETAKE) POSE_JUMPED else null
+    }
+    fun checkPose(s: ArController.HeightCameraSnapshot?): Verdict {
+        val v = if (s == null) poseSpeedGuard.interrupt()
+            else poseSpeedGuard.observe(s.position, s.timestampNanos / 1e9, s.trackedTrunk)
+        publishPoseState(s?.timestampNanos)
+        return v
+    }
 
     // Manual height entry (typed metres) — iOS .manualEntry state.
     var manualOpen by remember { mutableStateOf(false) }
@@ -421,15 +430,20 @@ fun HeightScanScreen(
     // the geometry a height bundle records: full camera poses at anchor /
     // base / top, the anchor hit type, and the 5 Hz pose-sample trail from
     // anchoring to compute. Populated only while armed; zero cost otherwise.
-    val rawCaptureArmed = settings.developerMode && settings.rawCaptureEnabled
-    val rawIMU = remember(rawCaptureArmed) { if (rawCaptureArmed) com.hcjeong.forestix.sensors.RawIMUCapture(context) else null }
     val rawLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     var rawResumed by remember(rawLifecycleOwner) {
         mutableStateOf(rawLifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
     }
+    val monitoringWalk = rawResumed && (stage == Stage.WALKING || stage == Stage.AIM_BASE || stage == Stage.AIM_TOP)
+    DisposableEffect(controller, monitoringWalk, rawIMU) {
+        val listener: (ArController.HeightCameraSnapshot?) -> Unit = { checkPose(it); Unit }
+        if (monitoringWalk) controller.heightPoseObserver = listener
+        onDispose { if (controller.heightPoseObserver === listener) controller.heightPoseObserver = null }
+    }
     DisposableEffect(rawLifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, _ ->
             rawResumed = rawLifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+            if (!rawResumed) { poseSpeedGuard.interrupt(); publishPoseState() }
         }
         rawLifecycleOwner.lifecycle.addObserver(observer)
         onDispose { rawLifecycleOwner.lifecycle.removeObserver(observer) }
@@ -676,27 +690,19 @@ fun HeightScanScreen(
             val tracking = controller.trackingOk()
             trackingLive = tracking
             if (!tracking && !trackingDropped) trackingDropped = true
-            // PHYSICAL PLAUSIBILITY, on top of the tracking latch — see
-            // POSE_JUMPED. A null pose drops the previous sample with it:
-            // differencing across an outage divides a world-frame re-fit by
-            // however long the cruiser stood in the dark and calls the result
-            // a walking pace.
+            // Recheck this exact sampled frame. The native observer sees the
+            // intervening frames even when the 10 Hz readout doesn't.
             val poseSample = controller.heightCameraSnapshot()
-            if (poseSample == null) poseSpeedGuard.reset()
-            else if (!poseJumped) {
+            val checked = if (stage == Stage.COMPUTED) Verdict.IGNORED else checkPose(if (tracking) poseSample else null)
+            // Never re-read the camera between admitting its pose and
+            // computing distance, and never substitute a prediction.
+            if (stage == Stage.WALKING && poseSample != null && checked == Verdict.USABLE) {
                 val p = poseSample.position
-                if (poseSpeedGuard.observe(p.x, p.y, p.z, poseSample.timestampNanos / 1e9)) poseJumped = true
-            }
-            // `poseJumped` freezes the readouts for the rest of the
-            // measurement, exactly as a null pose freezes them for as long as
-            // it lasts. The pose is still being published and still looks
-            // ordinary — it has simply already moved in a way the cruiser did
-            // not, so every distance derived from it is out by however far the
-            // world slid. The last figure the app can stand behind is the
-            // honest thing to leave on screen.
-            if (stage == Stage.WALKING && !poseJumped) {
-                anchorPt?.let { a -> controller.horizontalDistanceTo(a)?.let { dhLive = it } }
-                standingAtAnchor?.let { s0 -> controller.horizontalDistanceTo(s0)?.let { walkedLive = it } }
+                fun horizontal(a: Vec3) = kotlin.math.hypot(p.x-a.x, p.z-a.z)
+                poseSample.trackedTrunk?.let { trunk ->
+                    dhLive = horizontal(trunk)
+                    initialStandingOffset?.let { walkedLive = horizontal(trunk + it) }
+                }
             }
             delay(100)
         }
@@ -1031,9 +1037,9 @@ fun HeightScanScreen(
                 // tapped "+" over and over with the eye-level prompt still on
                 // screen. Same order on both platforms now: missing hit is
                 // inert, missing pose speaks.
-                val standing = controller.heightCameraSnapshot()?.position
-                val d0 = controller.horizontalDistanceTo(hit)
-                if (standing == null || d0 == null) {
+                val placement = controller.heightCameraSnapshot()
+                val standing = placement?.position
+                if (standing == null) {
                     failure = CAMERA_NOT_READY
                     fieldCapture.refuse(id, "no_camera_pose")
                     return
@@ -1067,9 +1073,11 @@ fun HeightScanScreen(
                 // A fresh trunk starts a fresh integrity record — the previous
                 // tree's runaway says nothing about this one, and the previous
                 // sample is in a world frame this walk does not share.
-                poseJumped = false
                 poseSpeedGuard.reset()
-                standingAtAnchor = standing
+                poseSpeedGuard.observe(standing, placement.timestampNanos/1e9, hit)
+                publishPoseState()
+                initialStandingOffset = standing - hit
+                val d0 = kotlin.math.hypot(standing.x-hit.x, standing.z-hit.z)
                 anchorInitialDistM = d0
                 dhLive = d0
                 walkedLive = 0f
@@ -1098,20 +1106,21 @@ fun HeightScanScreen(
                 // walk. Null means ARCore stopped it: there is no trunk to
                 // measure d_h to, so this refuses rather than reusing a stale
                 // point that would still produce a confident-looking number.
-                val anchor = ArSessionHub.heightAnchorWorld()
-                if (anchor == null) {
+                if (anchorLost || ArSessionHub.heightAnchorWorld() == null) {
                     anchorLost = true; failure = ANCHOR_LOST
                     fieldCapture.stageRefused(id, "base", "anchor_lost"); return
                 }
-                anchorPt = anchor
+                val anchor = sighting?.trackedTrunk
                 // A pose that has already run away leaves d_h frozen at a
                 // distance from a world frame nothing stands behind. Same
                 // shape of refusal as the lost anchor, same reason: the stale
                 // number would still produce a confident-looking height.
-                if (poseJumped) {
-                    failure = POSE_JUMPED; fieldCapture.stageRefused(id, "base", "pose_jumped"); return
+                val v = checkPose(sighting)
+                if (v != Verdict.USABLE) {
+                    failure = when (v) { Verdict.RETAKE -> POSE_JUMPED; Verdict.CHECKING -> checkingText; else -> CAMERA_NOT_READY }
+                    fieldCapture.stageRefused(id, "base", when (v) { Verdict.RETAKE -> "pose_jumped"; Verdict.CHECKING -> "pose_checking"; else -> "no_camera_pose" }); return
                 }
-                if (a == null || s == null) {
+                if (a == null || s == null || anchor == null) {
                     failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "base", "no_camera_pose"); return
                 }
                 if (MeasurementTargetRange.rejection(MeasurementTargetRange.distance(s.x,s.y,s.z,anchor.x,anchor.y,anchor.z)) != null) {
@@ -1120,6 +1129,7 @@ fun HeightScanScreen(
                 }
                 // Lock the standing pose on the first aim; both angles must
                 // come from the same spot (the §7.2 formula assumes it).
+                anchorPt = anchor
                 failure = null; alphaBase = a
                 standingOffset = Vec3(s.x - anchor.x, s.y - anchor.y, s.z - anchor.z)
                 if (rawCaptureArmed) {
@@ -1155,20 +1165,22 @@ fun HeightScanScreen(
                 val sighting = controller.heightCameraSnapshot()
                 val aTop = sighting?.elevationRad
                 // Same rule as the base aim: the live anchor pose or nothing.
-                val anchor = ArSessionHub.heightAnchorWorld()
-                if (anchor == null) {
+                if (anchorLost || ArSessionHub.heightAnchorWorld() == null) {
                     anchorLost = true; failure = ANCHOR_LOST
                     fieldCapture.stageRefused(id, "top", "anchor_lost"); return
                 }
-                anchorPt = anchor
+                val anchor = sighting?.trackedTrunk
                 // Same refusal as the base aim — see it.
-                if (poseJumped) {
-                    failure = POSE_JUMPED; fieldCapture.stageRefused(id, "top", "pose_jumped"); return
+                val v = checkPose(sighting)
+                if (v != Verdict.USABLE) {
+                    failure = when (v) { Verdict.RETAKE -> POSE_JUMPED; Verdict.CHECKING -> checkingText; else -> CAMERA_NOT_READY }
+                    fieldCapture.stageRefused(id, "top", when (v) { Verdict.RETAKE -> "pose_jumped"; Verdict.CHECKING -> "pose_checking"; else -> "no_camera_pose" }); return
                 }
                 // Rebuilt against the anchor just re-read above, so `standing`
                 // and `anchor` are in ONE world frame — see `standingOffset`.
+                if (anchor != null) anchorPt = anchor
                 val standing = standingNow(); val aBase = alphaBase
-                if (aTop == null || standing == null || aBase == null) {
+                if (aTop == null || standing == null || aBase == null || anchor == null) {
                     failure = CAMERA_NOT_READY; fieldCapture.stageRefused(id, "top", "no_camera_pose"); return
                 }
                 val currentPosition = sighting.position
@@ -1269,13 +1281,13 @@ fun HeightScanScreen(
         stage = Stage.ANCHOR; anchorPt = null; standingOffset = null
         alphaBase = null; alphaTop = null; topOffset = null; baseOffset = null
         aimDriftM = null
-        dhLive = 0f; anchorInitialDistM = null; standingAtAnchor = null
+        dhLive = 0f; anchorInitialDistM = null; initialStandingOffset = null
         walkedLive = 0f; anchorAimOk = false
         // Release the ARCore trunk anchor with the rest of the geometry — a
         // new measurement must pin its own trunk, never inherit the last one.
         ArSessionHub.clearHeightAnchor()
         trackingLive = true; trackingDropped = false; anchorLost = false
-        poseJumped = false; poseSpeedGuard.reset()
+        poseSpeedGuard.reset(); publishPoseState()
         result = null; failure = null; resetCrown()
         // Drop the raw-capture geometry so a fresh measurement starts clean.
         // Releasing the bundle id too: a discarded compute must not collect
@@ -1931,9 +1943,10 @@ fun HeightScanScreen(
                 // is not something to hold still through — the distance is not
                 // coming back — so printing "hold still" over it would be
                 // advice that cannot work. Same precedence on iOS.
-                poseJumped && stage in listOf(
+                poseState == Verdict.RETAKE && stage in listOf(
                     Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP,
                 ) -> POSE_JUMPED
+                poseState == Verdict.CHECKING && stage in listOf(Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP) -> checkingText
                 !trackingLive && stage in listOf(
                     Stage.WALKING, Stage.AIM_BASE, Stage.AIM_TOP,
                 ) -> TRACKING_LOST_NOW

@@ -129,8 +129,8 @@ public final class HeightScanViewModel: ObservableObject {
     /// reference left to compute d_h against, so the aim taps refuse.
     @Published public private(set) var anchorLost: Bool = false
 
-    /// The camera pose moved faster than a person on foot can move. Latched
-    /// for the rest of the measurement, and as fatal as `anchorLost`.
+    /// A fast observation is quarantined. Only a confirmed or unresolved
+    /// discontinuity latches a retake; a verified one-frame return does not.
     ///
     /// FIELD ROUND 10 — THE RUNAWAY ANCHOR. The cruiser stands still and
     /// "Walked back" climbs; sometimes the sphere leaves the screen within a
@@ -159,7 +159,10 @@ public final class HeightScanViewModel: ObservableObject {
     /// not the cruiser. It also catches the other half of the report — the
     /// relocalization re-fit, which lands as a one-frame position jump because
     /// `currentCameraWorldPosition` keeps publishing through `.limited`.
-    @Published public private(set) var poseJumped: Bool = false
+    @Published private var poseVerdict = CameraPoseSpeedGuard.Verdict.ignored
+    public var poseJumped: Bool { poseVerdict == .retake }
+    public var poseChecking: Bool { poseVerdict == .checking }
+    public static let poseCheckingText = "Stay here and hold steady while the distance is checked."
 
     /// Ceiling on how fast the camera may move and still be a person on foot.
     ///
@@ -178,7 +181,7 @@ public final class HeightScanViewModel: ObservableObject {
     public static let trackingLostNow =
         "Tracking lost — hold still until the camera picks the scene back up. The distance is frozen, not restarted."
     public static let trackingDroppedDuringWalkText =
-        "Tracking dropped during the walk-off, so the distance to the trunk may have shifted. Retake for a firm number."
+        "Tracking was interrupted during the walk."
     public static let anchorLostText =
         "The trunk anchor is gone — the camera couldn't hold it. Tap Retake and anchor the trunk again."
     public static let poseJumpedText =
@@ -243,28 +246,12 @@ public final class HeightScanViewModel: ObservableObject {
     /// missing frame is not a lost trunk.
     private var anchorPoseStaleSince: TimeInterval?
 
-    /// How long the trunk anchor may read as missing before the measurement
-    /// gives up on it. Same 0.5 s as `ActiveSamplingPlot.trackingGraceSeconds`
-    /// and Android's `PLOT_POSE_GRACE_MS` — one value for "ARKit has not
-    /// answered yet" across the app.
-    private static let anchorGraceSeconds: TimeInterval = 0.5
+    /// Require sustained absence during healthy tracking, not a relocalization gap.
+    private static let anchorGraceSeconds: TimeInterval = 2.0
+    private var lastMissingAnchorFrame: TimeInterval?
 
-    /// Camera world position frozen at the moment the anchor was
-    /// captured — reference point for the "Walked back" displacement.
-    ///
-    /// DELIBERATELY A RAW POINT, not an `ARAnchor`, unlike `trunkAnchorID`.
-    /// The argument for anchoring the trunk is that its position enters d_h and
-    /// d_h is the whole scale of H, so every world-frame correction the walk
-    /// collects lands in the measurement. This point enters NOTHING: it feeds
-    /// the "Walked back" readout and only that. A relocalization will still
-    /// shift it, and the readout will still be off by the correction — so it is
-    /// a DISPLAY number, and it is labelled as one here rather than being made
-    /// to look like a measurement. Anchoring it would mean a second anchor with
-    /// its own release path on every exit, retake and re-anchor, i.e. another
-    /// thing that can leak, bought for a line of chrome. The distance the
-    /// cruiser actually acts on is "Total distance", which is measured to the
-    /// anchored trunk.
-    private var cameraPositionAtAnchor: SIMD3<Float>?
+    /// Initial standing offset from the trunk, invariant to a shared AR translation.
+    private var initialStandingOffset: SIMD3<Float>?
 
     /// Standing pose at aim-top tap — §7.2 uses the same standing point
     /// for both taps, so we lock it on the first tap and reuse it.
@@ -359,6 +346,7 @@ public final class HeightScanViewModel: ObservableObject {
         UUID(uuidString: "00000000-A0A0-0000-0000-000000000003") ?? UUID()
 
     private var depthCancellable: AnyCancellable?
+    private var walkPoseCancellable: AnyCancellable?
 
     // MARK: - Raw-capture recording (developer-mode research)
 
@@ -454,10 +442,23 @@ public final class HeightScanViewModel: ObservableObject {
         // depth-frame camera pose) + mesh raycasts; no VIO feature
         // stream. Applied with no reset options — anchors survive.
         session.attach(client: arClientID, configuration: .heightScan)
+        // Check native observations, not just the slower depth/readout stream:
+        // two bad successive frames must never masquerade as one outlier.
+        walkPoseCancellable = session.$cameraPositionTimestamp.dropFirst().sink { [weak self] t in
+            guard let self, self.state == .walking || self.state == .aimBaseArmed || self.state == .aimTopArmed else { return }
+            if let t, let p = self.session.currentCameraWorldPosition {
+                _ = self.observePose(position: p, timestamp: t)
+            } else {
+                _ = self.poseSpeedGuard.interrupt(); self.publishPoseVerdict()
+            }
+        }
         subscribeToDepth()
     }
 
     public func onDisappear() {
+        walkPoseCancellable?.cancel(); walkPoseCancellable = nil
+        _ = poseSpeedGuard.interrupt()
+        publishPoseVerdict()
         rawScreenActive = false
         updateInertialRecording()
         session.detach(client: arClientID)
@@ -487,8 +488,9 @@ public final class HeightScanViewModel: ObservableObject {
                 // Integrity FIRST: it publishes `trackingLive` for this frame,
                 // and both the pose trail and the walk readout below gate on
                 // it. Called the other way round the gate was a frame stale.
-                self.observeWalkIntegrity(frame: frame)
+                let usable = self.observeWalkIntegrity(frame: frame)
                 self.collectPoseSampleIfNeeded(frame)
+                guard usable else { return }
                 self.samplePoseElevation(frame)
                 guard self.state == .walking else { return }
                 // No usable camera pose (ARKit reports `.notAvailable`): HOLD
@@ -498,14 +500,8 @@ public final class HeightScanViewModel: ObservableObject {
                 // silently restarting the walked distance is the one outcome
                 // this screen must never produce (field round 9).
                 //
-                // `poseJumped` holds them for the rest of the measurement, and
-                // for the same reason one step further on: the pose is being
-                // published and looks ordinary, but it has already moved in a
-                // way no cruiser did, so every distance derived from it is
-                // wrong by however far the world frame slid. Freezing at the
-                // last figure the app can stand behind is the honest outcome;
-                // the status line says so and the aim taps refuse (field round
-                // 10 — the runaway anchor).
+                // Only measured, admitted positions reach the walk panel.
+                // Predicted positions are never published or used for a tap.
                 guard self.trackingLive, !self.poseJumped else { return }
                 let pose = frame.cameraPoseWorld
                 let standing = SIMD3<Float>(pose.columns.3.x,
@@ -546,7 +542,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// (`trackingLive`, for the "hold still" status line) and for the whole
     /// measurement (`trackingDroppedDuringWalk`, which the result panel
     /// repeats at the moment the cruiser decides whether to keep the number).
-    private func observeWalkIntegrity(frame: ARDepthFrame) {
+    private func observeWalkIntegrity(frame: ARDepthFrame) -> Bool {
         // EVERY STATE THAT STILL DRAWS A MARKER, not just the aiming ones.
         //
         // `.computed` and `.rejected` were missing and `.aimTopCaptured` is a
@@ -561,7 +557,7 @@ public final class HeightScanViewModel: ObservableObject {
         switch state {
         case .walking, .aimBaseArmed, .aimTopArmed, .aimTopCaptured,
              .computed, .rejected: break
-        default: return
+        default: return true
         }
         if let id = trunkAnchorID, !anchorLost {
             // TWO DIFFERENT QUESTIONS, and this block used to ask only the
@@ -595,7 +591,7 @@ public final class HeightScanViewModel: ObservableObject {
             // and carried into the research row.
             if session.worldAnchorExists(id: id) {
                 anchorPoseStaleSince = nil
-                if let corrected = session.trackedWorldAnchorPosition(id: id) {
+                if let corrected = session.heightReference(id: id, timestamp: frame.timestamp) {
                     // Republish the markers only when the correction is big
                     // enough to see (1 cm). This runs at the depth frame rate
                     // and every rebuild replaces the whole `sceneMarkers` array.
@@ -616,14 +612,14 @@ public final class HeightScanViewModel: ObservableObject {
                 // `currentFrame` is also nil across a pause, which is the other
                 // way a live anchor reads as missing for a moment.
                 //
-                // Same grace, same duration, as the plot centre
-                // (`ActiveSamplingPlot.trackingGraceSeconds`) and the Android
-                // sibling (`PLOT_POSE_GRACE_MS`) — one reason to be missing is
-                // a frame, several in a row is a lost trunk.
-                let now = ProcessInfo.processInfo.systemUptime
-                let staleSince = anchorPoseStaleSince ?? now
-                anchorPoseStaleSince = staleSince
-                if now - staleSince >= Self.anchorGraceSeconds {
+                // Count contiguous healthy observations, not wall time.
+                let now = frame.timestamp
+                let contiguous = lastMissingAnchorFrame.map { now >= $0 && now-$0 <= 0.5 } ?? false
+                lastMissingAnchorFrame = now
+                // A blind or relocalizing interval is not proof that the trunk disappeared.
+                if session.trackingStatus != .normal { anchorPoseStaleSince = nil }
+                else if !contiguous || anchorPoseStaleSince == nil { anchorPoseStaleSince = now }
+                if let since = anchorPoseStaleSince, now-since >= Self.anchorGraceSeconds {
                     // ARKit dropped the anchor: there is no trunk to measure
                     // d_h to any more, and the aim taps refuse from here.
                     anchorLost = true
@@ -666,7 +662,9 @@ public final class HeightScanViewModel: ObservableObject {
             && !session.isRelocalizing
         if trackingLive != live { trackingLive = live }
         if !live, !trackingDroppedDuringWalk { trackingDroppedDuringWalk = true }
-        observePoseSpeed(frame: frame)
+        let c = frame.cameraPoseWorld.columns.3
+        guard state == .walking || state == .aimBaseArmed || state == .aimTopArmed else { return true }
+        return observePose(position: SIMD3<Float>(c.x,c.y,c.z), timestamp: frame.timestamp)
     }
 
     /// The physical plausibility half of walk-off integrity — see `poseJumped`
@@ -675,15 +673,28 @@ public final class HeightScanViewModel: ObservableObject {
     /// Keep each position paired with its own sensor-frame timestamp. Main
     /// actor delivery can bunch up after a UI stall; processing-time deltas
     /// incorrectly turned an ordinary walk into a permanent pose-jump refusal.
-    private func observePoseSpeed(frame: ARDepthFrame) {
-        guard !poseJumped else { return }
-        guard session.trackingStatus != .notAvailable else {
-            poseSpeedGuard.reset()
-            return
+    private func observePose(position: SIMD3<Float>, timestamp: TimeInterval, forTap: Bool = false) -> Bool {
+        let verdict: CameraPoseSpeedGuard.Verdict
+        if session.trackingStatus == .notAvailable || session.isRelocalizing {
+            verdict = poseSpeedGuard.interrupt()
+        } else {
+            let a = trunkAnchorID.flatMap { session.heightReference(id: $0, timestamp: timestamp) }
+            verdict = poseSpeedGuard.observe(position: position, timestamp: timestamp, trackedAnchor: a)
+            if forTap, verdict == .usable, let a, anchorPointWorld != a { anchorPointWorld = a }
         }
-        let t = frame.cameraPoseWorld.columns.3
-        if poseSpeedGuard.observe(position: SIMD3<Float>(t.x, t.y, t.z), timestamp: frame.timestamp) {
-            poseJumped = true
+        publishPoseVerdict(timestamp: timestamp)
+        return verdict == .usable
+    }
+
+    private func publishPoseVerdict(timestamp: TimeInterval? = nil) {
+        guard poseVerdict != poseSpeedGuard.state else { return }
+        let prior = poseVerdict
+        poseVerdict = poseSpeedGuard.state
+        if poseVerdict == .checking { rawIMU?.mark("walk_pose_checking", arTimestamp: timestamp) }
+        if prior == .checking && poseVerdict == .usable { rawIMU?.mark("walk_pose_recovered", arTimestamp: timestamp) }
+        if poseVerdict == .retake { rawIMU?.mark("walk_pose_retake", arTimestamp: timestamp) }
+        if !poseChecking, anchorFailureReason == Self.poseCheckingText {
+            anchorFailureReason = poseJumped ? Self.poseJumpedText : nil
         }
     }
 
@@ -766,19 +777,25 @@ public final class HeightScanViewModel: ObservableObject {
     /// frame that is being re-fitted and will jump. `.limited` for the other
     /// two reasons still returns a position: it is degraded, not absent, and
     /// it covers most of a real walk-off under canopy.
-    private func currentCameraTranslation() -> SIMD3<Float>? {
+    private func currentCameraTranslation(validateHeightPose: Bool = false) -> SIMD3<Float>? {
         guard session.trackingStatus != .notAvailable,
-              !session.isRelocalizing else { return nil }
+              !session.isRelocalizing else {
+            if validateHeightPose { _ = poseSpeedGuard.interrupt(); publishPoseVerdict() }
+            return nil
+        }
         let now = nowForPitchBuffer()
         if let p = session.currentCameraWorldPosition,
            let timestamp = session.cameraPositionTimestamp,
            HeightSampleFreshness.isRecent(ageSeconds: now - timestamp),
-           p.x.isFinite, p.y.isFinite, p.z.isFinite { return p }
+           p.x.isFinite, p.y.isFinite, p.z.isFinite {
+            return !validateHeightPose || observePose(position: p, timestamp: timestamp, forTap: true) ? p : nil
+        }
         if let frame = session.latestDepthFrame,
            HeightSampleFreshness.isRecent(ageSeconds: now - frame.timestamp) {
             let c = frame.cameraPoseWorld.columns.3
             guard c.x.isFinite, c.y.isFinite, c.z.isFinite else { return nil }
-            return SIMD3<Float>(c.x, c.y, c.z)
+            let p = SIMD3<Float>(c.x, c.y, c.z)
+            return !validateHeightPose || observePose(position: p, timestamp: frame.timestamp, forTap: true) ? p : nil
         }
         return nil
     }
@@ -822,14 +839,19 @@ public final class HeightScanViewModel: ObservableObject {
         trackingLive = true
         trackingDroppedDuringWalk = false
         anchorLost = false
-        poseJumped = false
         poseSpeedGuard.reset()
+        if trunkAnchorID != nil, session.currentCameraWorldPosition == standingPointWorld,
+           let t = session.cameraPositionTimestamp, HeightSampleFreshness.isRecent(ageSeconds: nowForPitchBuffer()-t) {
+            _ = poseSpeedGuard.observe(position: standingPointWorld, timestamp: t, trackedAnchor: anchorPointWorld)
+        }
+        publishPoseVerdict()
         anchorPoseStaleSince = nil
+        lastMissingAnchorFrame = nil
         // Freeze the walk-panel reference values: "Initial dist" is the
         // camera→anchor horizontal distance at this instant, and the
         // camera position becomes the origin the "Walked back"
         // displacement is measured from (so it starts at 0.00).
-        cameraPositionAtAnchor = standingPointWorld
+        initialStandingOffset = standingPointWorld - anchorPointWorld
         initialDistanceM = horizontalDistance(from: standingPointWorld,
                                               to: anchorPointWorld)
         walkedBackMeters = 0
@@ -872,9 +894,9 @@ public final class HeightScanViewModel: ObservableObject {
         // Horizontal, like every other distance in the walk panel, so
         // Initial dist + Walked back ≈ Total distance on a straight
         // walk-off.
-        if let origin = cameraPositionAtAnchor {
+        if let origin = initialStandingOffset {
             walkedBackMeters = horizontalDistance(from: standingPointWorld,
-                                                  to: origin)
+                                                  to: anchor + origin)
         }
     }
 
@@ -884,6 +906,7 @@ public final class HeightScanViewModel: ObservableObject {
     /// top-then-base, so we arm the BASE aim first.
     public func continueToAimTop() {
         guard mayContinueFieldCapture() else { return }
+        guard !poseChecking, !poseJumped else { return }
         guard state == .walking, anchorPointWorld != nil else { return }
         // d_h freezes here, so it has to be the distance AT THE TAP. The walk
         // panel is published at 10 Hz; the standing point behind it is
@@ -902,6 +925,7 @@ public final class HeightScanViewModel: ObservableObject {
                             aimedAtWorld: SIMD3<Float>? = nil) {
         guard mayContinueFieldCapture() else { return }
         guard state == .walking || state == .aimBaseArmed, anchorPointWorld != nil else { return }
+        guard !poseChecking, !poseJumped else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
             return
@@ -933,6 +957,7 @@ public final class HeightScanViewModel: ObservableObject {
         guard state == .aimTopArmed, anchorPointWorld != nil,
               alphaBaseRad != nil, standingPointWorldAtAimTop != nil
         else { return }
+        guard !poseChecking, !poseJumped else { return }
         guard let median = resilientMedianPitch(tapTime: tapTime) else {
             anchorFailureReason = "A recent camera angle is required. Aim again, then tap +."
             return
@@ -1111,8 +1136,8 @@ public final class HeightScanViewModel: ObservableObject {
         // point was locked at the base tap and is never re-fitted, so a re-fit
         // in between rescales H by whatever it moved. Same sentence as the base
         // tap and the anchor tap, and the same one Android shows.
-        guard let now = currentCameraTranslation() else {
-            anchorFailureReason = Self.cameraNotReadyText
+        guard let now = currentCameraTranslation(validateHeightPose: true) else {
+            anchorFailureReason = poseJumped ? Self.poseJumpedText : poseChecking ? Self.poseCheckingText : Self.cameraNotReadyText
             return
         }
         if [screenCenterHit,anchorPointWorld].compactMap({ $0 }).contains(where: {
@@ -1149,8 +1174,8 @@ public final class HeightScanViewModel: ObservableObject {
             anchorFailureReason = Self.poseJumpedText
             return
         }
-        guard let p = currentCameraTranslation() else {
-            anchorFailureReason = Self.cameraNotReadyText
+        guard let p = currentCameraTranslation(validateHeightPose: true) else {
+            anchorFailureReason = poseJumped ? Self.poseJumpedText : poseChecking ? Self.poseCheckingText : Self.cameraNotReadyText
             return
         }
         if [screenCenterHit,anchorPointWorld].compactMap({ $0 }).contains(where: {
@@ -1211,8 +1236,8 @@ public final class HeightScanViewModel: ObservableObject {
         trackingLive = true
         trackingDroppedDuringWalk = false
         anchorLost = false
-        poseJumped = false
         poseSpeedGuard.reset()
+        publishPoseVerdict()
         anchorPoseStaleSince = nil
         alphaTopRad = nil
         alphaBaseRad = nil
@@ -1223,7 +1248,7 @@ public final class HeightScanViewModel: ObservableObject {
         result = nil
         dhMeters = 0
         walkHintMeters = 0
-        cameraPositionAtAnchor = nil
+        initialStandingOffset = nil
         initialDistanceM = 0
         walkedBackMeters = 0
         alphaTopSampleCount = 0

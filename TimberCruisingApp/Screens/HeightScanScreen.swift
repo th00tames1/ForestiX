@@ -1071,6 +1071,7 @@ public struct HeightScanScreen: View {
             // back — so printing "hold still" over it would be advice that
             // cannot work. Same precedence on Android.
             if viewModel.poseJumped { return HeightScanViewModel.poseJumpedText }
+            if viewModel.poseChecking { return HeightScanViewModel.poseCheckingText }
             if !viewModel.trackingLive { return HeightScanViewModel.trackingLostNow }
         default: break
         }

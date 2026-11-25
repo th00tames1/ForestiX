@@ -90,13 +90,16 @@ class ArController {
         val pose = camera.pose
         val t = pose.translation
         val z = pose.zAxis
-        heightFrame = HeightCameraSnapshot(
+        val observer = heightPoseObserver
+        val heightSample = HeightCameraSnapshot(
             Vec3(t[0], t[1], t[2]),
             kotlin.math.atan2(-z[1], sqrt(z[0]*z[0] + z[2]*z[2])),
             camera.trackingState == TrackingState.TRACKING,
             FloatArray(16).also { pose.toMatrix(it, 0) },
-            frame.timestamp,
-        ) to received
+            frame.timestamp, if (observer == null) null else ArSessionHub.heightAnchorWorld(requireTracking = true),
+        )
+        heightFrame = heightSample to received
+        observer?.invoke(heightSample.takeIf { it.trackingNormal })
         if (frame.camera.trackingState != TrackingState.TRACKING) trackedNormalSinceWatch = false
     }
 
@@ -376,10 +379,14 @@ class ArController {
         return distance(cam, hit).toDouble()
     }
 
+    // SceneView's onSessionUpdated dispatch; owned only by the active height screen.
+    var heightPoseObserver: ((HeightCameraSnapshot?) -> Unit)? = null
+
     data class HeightCameraSnapshot(
         val position: Vec3, val elevationRad: Float,
         val trackingNormal: Boolean, val poseMatrix: FloatArray,
         val timestampNanos: Long,
+        val trackedTrunk: Vec3? = null,
     )
 
     /** A sighting reads one copied AR frame, not separately advancing poses. */

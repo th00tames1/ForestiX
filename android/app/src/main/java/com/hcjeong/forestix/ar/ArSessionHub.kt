@@ -345,9 +345,10 @@ object ArSessionHub {
     /// never read through — whereas the plot ring is drawn continuously and
     /// nothing else was checking it. Freezing the marker with the camera pose
     /// also keeps it from jumping on every momentary dropout.
-    fun heightAnchorWorld(): Vec3? {
+    fun heightAnchorWorld(requireTracking: Boolean = false): Vec3? {
         val anchor = heightAnchor ?: return null
-        if (anchor.trackingState == TrackingState.STOPPED) return null
+        val state = anchor.trackingState
+        if (state == TrackingState.STOPPED || (requireTracking && state != TrackingState.TRACKING)) return null
         val pose = anchor.pose
         return Vec3(pose.tx(), pose.ty(), pose.tz())
     }
